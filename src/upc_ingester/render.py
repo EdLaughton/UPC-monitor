@@ -8,6 +8,7 @@ from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
+from .config import Settings
 from .db import Database
 
 
@@ -30,15 +31,22 @@ def atomic_write_text(path: Path, content: str) -> None:
     Path(tmp_name).replace(path)
 
 
-def latest_payload(decisions: list[dict[str, Any]], generated_at: str) -> dict[str, Any]:
+def latest_payload(decisions: list[dict[str, Any]], generated_at: str, total_count: int) -> dict[str, Any]:
     return {
         "generated_at": generated_at,
         "count": len(decisions),
+        "total_database_count": total_count,
         "items": decisions,
     }
 
 
-def status_payload(db: Database, generated_at: str, decision_count: int) -> dict[str, Any]:
+def status_payload(
+    db: Database,
+    generated_at: str,
+    latest_count: int,
+    total_count: int,
+    settings: Settings,
+) -> dict[str, Any]:
     latest_run = db.get_latest_run()
     counts = db.get_status_counts()
     last_success = None
@@ -48,7 +56,17 @@ def status_payload(db: Database, generated_at: str, decision_count: int) -> dict
     return {
         "generated_at": generated_at,
         "database_path": str(db.path),
-        "decision_count_in_latest_json": decision_count,
+        "decision_count_in_latest_json": latest_count,
+        "decision_count_total": total_count,
+        "latest_export_limit": settings.latest_export_limit,
+        "write_all_json": settings.write_all_json,
+        "exports": {
+            "latest_json": "/latest.json",
+            "status_json": "/status.json",
+            "stats_json": "/stats.json",
+            "all_ndjson": "/all.ndjson",
+            "all_json": "/all.json" if settings.write_all_json else None,
+        },
         "counts": counts,
         "latest_run": latest_run,
         "last_attempt_at": latest_run.get("started_at") if latest_run else None,
@@ -58,25 +76,61 @@ def status_payload(db: Database, generated_at: str, decision_count: int) -> dict
     }
 
 
-def render_outputs(db: Database, public_dir: Path) -> None:
-    decisions = db.get_decisions()
+def write_ndjson(path: Path, rows: list[dict[str, Any]]) -> None:
+    content = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+    atomic_write_text(path, content)
+
+
+def render_outputs(db: Database, settings_or_public_dir: Settings | Path) -> None:
+    if isinstance(settings_or_public_dir, Settings):
+        settings = settings_or_public_dir
+        public_dir = settings.public_dir
+        latest_limit = settings.latest_export_limit
+        write_all_json = settings.write_all_json
+    else:
+        # Backwards-compatible path for older call sites/tests.
+        settings = Settings.from_env()
+        public_dir = settings_or_public_dir
+        latest_limit = settings.latest_export_limit
+        write_all_json = settings.write_all_json
+
+    all_decisions = db.get_decisions()
+    latest_decisions = db.get_decisions(limit=latest_limit)
     generated_at = utc_now()
 
     json_content = json.dumps(
-        latest_payload(decisions, generated_at),
+        latest_payload(latest_decisions, generated_at, len(all_decisions)),
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     )
     atomic_write_text(public_dir / "latest.json", json_content + "\n")
 
+    stats_content = json.dumps(
+        {"generated_at": generated_at, **db.get_stats()},
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    atomic_write_text(public_dir / "stats.json", stats_content + "\n")
+
     status_content = json.dumps(
-        status_payload(db, generated_at, len(decisions)),
+        status_payload(db, generated_at, len(latest_decisions), len(all_decisions), settings),
         ensure_ascii=False,
         indent=2,
         sort_keys=True,
     )
     atomic_write_text(public_dir / "status.json", status_content + "\n")
+
+    write_ndjson(public_dir / "all.ndjson", all_decisions)
+    if write_all_json:
+        all_json_content = json.dumps(
+            {"generated_at": generated_at, "count": len(all_decisions), "items": all_decisions},
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        atomic_write_text(public_dir / "all.json", all_json_content + "\n")
 
     template_dir = Path(__file__).parent / "templates"
     env = Environment(
@@ -85,5 +139,5 @@ def render_outputs(db: Database, public_dir: Path) -> None:
     )
     env.filters["preview"] = preview
     template = env.get_template("index.html.j2")
-    html = template.render(decisions=decisions, generated_at=generated_at)
+    html = template.render(decisions=latest_decisions, generated_at=generated_at)
     atomic_write_text(public_dir / "index.html", html)
