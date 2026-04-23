@@ -396,8 +396,8 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                     now = utc_now()
                     for item in items:
                         db.mark_seen(item, now, bootstrapped=True)
-                    render_outputs(db, settings.public_dir)
                     db.finish_run(run_db_id, utc_now(), "success", discovered_count, 0)
+                    render_outputs(db, settings.public_dir)
                     return {"status": "success", "discovered_count": discovered_count, "new_count": 0}
 
                 for item in items:
@@ -425,7 +425,6 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                 await context.close()
                 await browser.close()
 
-        render_outputs(db, settings.public_dir)
         status = "success" if not item_errors else "partial_success"
         db.finish_run(
             run_db_id,
@@ -435,10 +434,12 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
             new_count,
             "\n".join(item_errors),
         )
+        render_outputs(db, settings.public_dir)
         return {"status": status, "discovered_count": discovered_count, "new_count": new_count}
     except Exception as exc:
         logger.exception("ingestion run failed")
         db.finish_run(run_db_id, utc_now(), "failed", discovered_count, new_count, str(exc))
+        render_outputs(db, settings.public_dir)
         raise
 
 
