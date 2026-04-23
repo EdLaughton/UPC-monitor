@@ -6,7 +6,6 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .config import Settings
 from .db import Database
@@ -14,7 +13,7 @@ from .parser import (
     DetailMetadata,
     IndexItem,
     clean_text,
-    extract_last_page,
+    extract_next_page_url,
     is_failure_page,
     parse_detail_page,
     parse_index_page,
@@ -22,7 +21,6 @@ from .parser import (
 from .parties import parse_parties
 from .pdfs import download_pdf, extract_pdf_sections
 from .render import render_outputs
-
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +35,6 @@ def utc_now() -> str:
 
 def run_id() -> str:
     return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-
-def build_index_url(base_url: str, page_number: int) -> str:
-    parsed = urlparse(base_url)
-    if page_number == 0 and not parsed.query:
-        return base_url
-
-    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query["page"] = str(page_number)
-    return urlunparse(parsed._replace(query=urlencode(query)))
 
 
 def debug_name(value: str) -> str:
@@ -88,7 +76,7 @@ async def settle_page(page, settings: Settings) -> None:
     except Exception:
         pass
     try:
-        await page.wait_for_selector("table, text=The API is currently unavailable", timeout=3000)
+        await page.wait_for_selector("table, main, text=The API is currently unavailable", timeout=3000)
     except Exception:
         pass
     await page.wait_for_timeout(500)
@@ -115,9 +103,15 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
         page = await context.new_page()
         try:
             items: list[IndexItem] = []
+            seen_urls: set[str] = set()
             page_number = 0
-            while True:
-                url = build_index_url(source_url, page_number)
+            url = source_url
+            while url:
+                if url in seen_urls:
+                    logger.warning("stopping discovery because pager looped back to %s", url)
+                    break
+                seen_urls.add(url)
+
                 logger.info("discovering UPC index page %s: %s", page_number, url)
                 await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
                 await accept_cookies(page)
@@ -142,12 +136,14 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 logger.info("index page %s yielded %s items", page_number, len(page_items))
                 items.extend(page_items)
 
-                last_page = extract_last_page(html)
                 if settings.max_pages and page_number + 1 >= settings.max_pages:
                     logger.info("stopping discovery at MAX_PAGES=%s", settings.max_pages)
                     break
-                if page_number >= last_page:
+
+                next_url = extract_next_page_url(html, page.url)
+                if not next_url:
                     break
+                url = next_url
                 page_number += 1
 
             return dedupe_items(items)
@@ -175,8 +171,13 @@ async def fetch_detail(context, item: IndexItem, settings: Settings, debug_dir: 
             raise ScraperError(f"UPC detail page appears unavailable for {item.item_key}")
         metadata = parse_detail_page(html, page.url)
         if not metadata.pdf_links:
-            await save_debug(debug_dir, f"{item.item_key}-detail-no-pdfs", html, page)
-            raise ScraperError(f"no official PDF links found for {item.item_key}")
+            await save_debug(
+                debug_dir,
+                f"{item.item_key}-detail-no-official-pdfs",
+                html,
+                page,
+                "No official UPC decision/order PDF links were found. Metadata will still be persisted.",
+            )
         return metadata
     finally:
         await page.close()
@@ -200,26 +201,65 @@ def split_keywords(raw: str) -> list[str]:
     return [part.strip() for part in re.split(r"\s*;\s*", raw or "") if part.strip()]
 
 
-async def ingest_item(context, db: Database, settings: Settings, item: IndexItem, debug_dir: Path) -> None:
-    metadata = merge_index_fallbacks(await fetch_detail(context, item, settings, debug_dir), item)
-    now = utc_now()
-    documents = []
-    for index, pdf_link in enumerate(metadata.pdf_links):
-        documents.append(
-            await download_pdf(
-                context=context,
-                link=pdf_link,
-                public_dir=settings.public_dir,
-                decision_date=metadata.decision_date,
-                node_url=item.node_url,
-                order_ref=metadata.order_or_decision_number or item.order_or_decision_number,
-                downloaded_at=now,
-                is_primary=index == 0,
-            )
-        )
+def empty_document_values(metadata: DetailMetadata) -> dict[str, str]:
+    first_pdf = metadata.pdf_links[0].url if metadata.pdf_links else ""
+    return {
+        "pdf_url_official": first_pdf,
+        "pdf_url_mirror": "",
+        "pdf_sha256": "",
+        "file_path": "",
+    }
 
-    primary = documents[0]
-    if (not metadata.headnote_text or not metadata.keywords_raw) and primary.get("file_path"):
+
+async def ingest_item(context, db: Database, settings: Settings, item: IndexItem, debug_dir: Path) -> None:
+    now = utc_now()
+    detail_error = ""
+    try:
+        metadata = await fetch_detail(context, item, settings, debug_dir)
+    except Exception as exc:
+        detail_error = f"detail fetch/parse failed: {exc}"
+        logger.exception("continuing with index metadata for %s after detail failure", item.item_key)
+        await save_debug(
+            debug_dir,
+            f"{item.item_key}-detail-error",
+            note=json.dumps({"item": item.__dict__, "error": str(exc)}, ensure_ascii=False, indent=2),
+        )
+        metadata = DetailMetadata()
+
+    metadata = merge_index_fallbacks(metadata, item)
+    documents = []
+    download_errors: list[str] = []
+
+    for index, pdf_link in enumerate(metadata.pdf_links):
+        try:
+            documents.append(
+                await download_pdf(
+                    context=context,
+                    link=pdf_link,
+                    public_dir=settings.public_dir,
+                    decision_date=metadata.decision_date,
+                    node_url=item.node_url,
+                    order_ref=metadata.order_or_decision_number or item.order_or_decision_number,
+                    downloaded_at=now,
+                    is_primary=index == 0,
+                )
+            )
+        except Exception as exc:
+            message = f"PDF download failed for {pdf_link.url}: {exc}"
+            logger.exception(message)
+            download_errors.append(message)
+            await save_debug(
+                debug_dir,
+                f"{item.item_key}-pdf-{index}-error",
+                note=json.dumps(
+                    {"item": item.__dict__, "pdf_link": pdf_link.__dict__, "error": str(exc)},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+
+    primary = documents[0] if documents else empty_document_values(metadata)
+    if documents and (not metadata.headnote_text or not metadata.keywords_raw) and primary.get("file_path"):
         pdf_headnotes, pdf_keywords = extract_pdf_sections(Path(str(primary["file_path"])))
         if not metadata.headnote_text and pdf_headnotes:
             metadata.headnote_raw = pdf_headnotes
@@ -229,6 +269,7 @@ async def ingest_item(context, db: Database, settings: Settings, item: IndexItem
             metadata.keywords_list = split_keywords(pdf_keywords)
 
     party_data = parse_parties(metadata.parties_raw)
+    last_error = "\n".join(part for part in [detail_error, *download_errors] if part)
     decision_values = {
         "item_key": item.item_key,
         "title_raw": metadata.title_raw,
@@ -252,20 +293,24 @@ async def ingest_item(context, db: Database, settings: Settings, item: IndexItem
         "headnote_text": metadata.headnote_text,
         "keywords_raw": metadata.keywords_raw,
         "keywords_list": metadata.keywords_list,
-        "pdf_url_official": str(primary["pdf_url_official"]),
-        "pdf_url_mirror": str(primary["pdf_url_mirror"]),
+        "pdf_url_official": str(primary.get("pdf_url_official", "")),
+        "pdf_url_mirror": str(primary.get("pdf_url_mirror", "")),
         "node_url": item.node_url,
-        "pdf_sha256": str(primary["pdf_sha256"]),
+        "pdf_sha256": str(primary.get("pdf_sha256", "")),
         "first_seen_at": now,
         "last_seen_at": now,
         "ingested_at": now,
         "alerted_at": now,
-        "last_error": "",
+        "last_error": last_error,
     }
     decision_id = db.upsert_decision(decision_values)
-    db.replace_documents(decision_id, documents)
+    if documents:
+        db.replace_documents(decision_id, documents)
     db.mark_seen(item, now, bootstrapped=False)
-    logger.info("ingested %s with %s mirrored PDF(s)", item.item_key, len(documents))
+    if documents:
+        logger.info("ingested %s with %s mirrored PDF(s)", item.item_key, len(documents))
+    else:
+        logger.warning("ingested %s metadata without mirrored PDFs", item.item_key)
 
 
 async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str, int | str]:
@@ -326,7 +371,7 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                         await ingest_item(context, db, settings, item, debug_run_dir)
                         new_count += 1
                     except Exception as exc:
-                        logger.exception("failed to ingest %s", item.item_key)
+                        logger.exception("failed to persist %s", item.item_key)
                         item_errors.append(f"{item.item_key}: {exc}")
                         await save_debug(
                             debug_run_dir,
