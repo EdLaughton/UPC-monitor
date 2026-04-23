@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from upc_ingester.parser import extract_last_page, is_failure_page, parse_detail_page, parse_index_page
+from upc_ingester.parser import (
+    extract_last_page,
+    extract_next_page_url,
+    is_failure_page,
+    parse_detail_page,
+    parse_index_page,
+)
 
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -20,6 +26,30 @@ def test_parse_index_rows_by_headers() -> None:
     assert item.division == "Local Division Paris"
     assert item.type_of_action == "Infringement action"
     assert extract_last_page(html) == 4
+
+
+def test_extract_next_page_url_from_upc_pager() -> None:
+    html = """
+    <nav class="pager" role="navigation" aria-labelledby="pagination-heading">
+      <ul class="pager__items js-pager__items">
+        <li class="pager__item is-active">
+          <a href="?judgement_type=All&amp;court_type=All&amp;division_1=125&amp;division_2=126&amp;division_3=139&amp;division_4=223&amp;proceedings_lang=All&amp;page=0" title="Current page" aria-current="page">1</a>
+        </li>
+        <li class="pager__item">
+          <a href="?judgement_type=All&amp;court_type=All&amp;division_1=125&amp;division_2=126&amp;division_3=139&amp;division_4=223&amp;proceedings_lang=All&amp;page=1" title="Go to page 2">2</a>
+        </li>
+        <li class="pager__item pager__item--next">
+          <a href="?judgement_type=All&amp;court_type=All&amp;division_1=125&amp;division_2=126&amp;division_3=139&amp;division_4=223&amp;proceedings_lang=All&amp;page=1" title="Go to next page" rel="next">Next</a>
+        </li>
+      </ul>
+    </nav>
+    """
+
+    assert extract_next_page_url(html, "https://www.unifiedpatentcourt.org/en/decisions-and-orders") == (
+        "https://www.unifiedpatentcourt.org/en/decisions-and-orders?"
+        "judgement_type=All&court_type=All&division_1=125&division_2=126&division_3=139&"
+        "division_4=223&proceedings_lang=All&page=1"
+    )
 
 
 def test_parse_index_rows_with_sort_text_in_headers() -> None:
@@ -73,21 +103,21 @@ def test_parse_detail_page_full_metadata_and_multiple_pdfs() -> None:
     assert detail.pdf_links[1].url.endswith("ORD_10339_2026_DE.pdf")
 
 
-def test_parse_detail_page_tolerates_empty_headnotes_and_keywords() -> None:
+def test_parse_detail_page_tolerates_empty_headnotes_keywords_and_missing_official_pdf() -> None:
     html = """
     <html><body>
       <h1>Decision</h1>
       <div>Case number</div><div>UPC_CFI_1/2026</div>
       <h2>Order Documents</h2>
-      <a href="/doc.pdf">PDF</a>
+      <a href="/doc.pdf">Generic PDF that must not be treated as an official UPC decision PDF</a>
     </body></html>
     """
-    detail = parse_detail_page(html, "https://example.test/en/node/1")
+    detail = parse_detail_page(html, "https://www.unifiedpatentcourt.org/en/node/1")
 
     assert detail.case_number == "UPC_CFI_1/2026"
     assert detail.headnote_raw == ""
     assert detail.keywords_list == []
-    assert detail.pdf_links[0].url == "https://example.test/doc.pdf"
+    assert detail.pdf_links == []
 
 
 def test_cloudflare_preconnect_alone_is_not_failure_page() -> None:
