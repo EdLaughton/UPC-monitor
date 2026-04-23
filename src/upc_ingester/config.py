@@ -5,6 +5,47 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+DEFAULT_SOURCE_URL = (
+    "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
+    "?case_number_search="
+    "&registry_number="
+    "&judgemet_reference="
+    "&judgement_type=All"
+    "&party_name="
+    "&court_type=All"
+    "&division_1=125"
+    "&division_2=126"
+    "&division_3=139"
+    "&division_4=223"
+    "&keywords="
+    "&headnotes="
+    "&proceedings_lang=All"
+    "&judgement_date_from%5Bdate%5D="
+    "&judgement_date_to%5Bdate%5D="
+    "&location_id=All"
+)
+
+DEFAULT_FALLBACK_SOURCE_URL = (
+    "https://www.unified-patent-court.org/en/decisions-and-orders"
+    "?case_number_search="
+    "&registry_number="
+    "&judgemet_reference="
+    "&judgement_type=All"
+    "&party_name="
+    "&court_type=All"
+    "&division_1=125"
+    "&division_2=126"
+    "&division_3=139"
+    "&division_4=223"
+    "&keywords="
+    "&headnotes="
+    "&proceedings_lang=All"
+    "&judgement_date_from%5Bdate%5D="
+    "&judgement_date_to%5Bdate%5D="
+    "&location_id=All"
+)
+
+
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -47,14 +88,8 @@ class Settings:
             pdfs_dir=public_dir / "pdfs",
             debug_dir=data_dir / "debug",
             db_path=data_dir / "upc.sqlite3",
-            source_url=os.getenv(
-                "SOURCE_URL",
-                "https://www.unifiedpatentcourt.org/en/decisions-and-orders",
-            ),
-            fallback_source_url=os.getenv(
-                "FALLBACK_SOURCE_URL",
-                "https://www.unified-patent-court.org/en/decisions-and-orders",
-            ),
+            source_url=os.getenv("SOURCE_URL", DEFAULT_SOURCE_URL),
+            fallback_source_url=os.getenv("FALLBACK_SOURCE_URL", DEFAULT_FALLBACK_SOURCE_URL),
             poll_cron=os.getenv("POLL_CRON", "0 * * * *"),
             timezone=os.getenv("TIMEZONE", "Europe/London"),
             run_on_start=env_bool("RUN_ON_START", True),
