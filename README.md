@@ -52,9 +52,15 @@ An Unraid template starter is included at `unraid/upc-monitor.xml`.
 
 First-run bootstrap, if you want to ignore everything already on the UPC site and only ingest future publications:
 
+1. Set `RUN_ON_START=false` for the first container start.
+2. Start the container.
+3. Run:
+
 ```bash
 docker exec -it upc-monitor python -m upc_ingester bootstrap
 ```
+
+4. Change `RUN_ON_START=true` and restart the container.
 
 After the container starts, open:
 
