@@ -1,6 +1,6 @@
 services:
   upc-monitor:
-    image: ${UPC_MONITOR_IMAGE:-ghcr.io/YOUR_GITHUB_USERNAME/upc-monitor:latest}
+    image: ${UPC_MONITOR_IMAGE:-ghcr.io/edlaughton/upc-monitor:latest}
     container_name: upc-monitor
     environment:
       POLL_CRON: "${POLL_CRON:-0 * * * *}"

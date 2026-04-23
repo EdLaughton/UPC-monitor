@@ -20,7 +20,7 @@ This repo includes a GitHub Actions workflow at `.github/workflows/docker-publis
 After the repo is pushed to GitHub, the workflow builds the Docker image and publishes:
 
 ```text
-ghcr.io/<your-github-username>/upc-monitor:latest
+ghcr.io/edlaughton/upc-monitor:latest
 ```
 
 For a public Unraid install, make the GHCR package public in GitHub:
@@ -38,7 +38,7 @@ Recommended Unraid setup uses the GHCR image built by GitHub Actions.
 1. Push this repo to GitHub and wait for the `Build and publish Docker image` workflow to finish.
 2. On Unraid, create `/mnt/user/appdata/upc-monitor`.
 3. Docker tab, Add Container.
-4. Set Repository to `ghcr.io/<your-github-username>/upc-monitor:latest`.
+4. Set Repository to `ghcr.io/edlaughton/upc-monitor:latest`.
 5. Set WebUI to `http://[IP]:[PORT:8000]/`.
 6. Add path mapping: host `/mnt/user/appdata/upc-monitor` to container `/data`, read/write.
 7. Add port mapping: host `8000` to container `8000`.
@@ -48,7 +48,7 @@ Recommended Unraid setup uses the GHCR image built by GitHub Actions.
    - `RUN_ON_START=true`
    - `LOG_LEVEL=INFO`
 
-An Unraid template starter is included at `unraid/upc-monitor.xml`. Replace `YOUR_GITHUB_USERNAME` in that file with your GitHub username before importing it.
+An Unraid template starter is included at `unraid/upc-monitor.xml`.
 
 First-run bootstrap, if you want to ignore everything already on the UPC site and only ingest future publications:
 
@@ -107,7 +107,7 @@ Environment variables:
 If you use the Docker Compose Manager plugin on Unraid, copy `docker-compose.unraid.yml`, set:
 
 ```bash
-UPC_MONITOR_IMAGE=ghcr.io/<your-github-username>/upc-monitor:latest
+UPC_MONITOR_IMAGE=ghcr.io/edlaughton/upc-monitor:latest
 ```
 
 and deploy it. The compose file persists all app data under `/mnt/user/appdata/upc-monitor`.

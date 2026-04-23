@@ -1,13 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Container version="2">
   <Name>upc-monitor</Name>
-  <Repository>ghcr.io/YOUR_GITHUB_USERNAME/upc-monitor:latest</Repository>
-  <Registry>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor/pkgs/container/upc-monitor</Registry>
+  <Repository>ghcr.io/edlaughton/upc-monitor:latest</Repository>
+  <Registry>https://github.com/EdLaughton/UPC-monitor/pkgs/container/upc-monitor</Registry>
   <Network>bridge</Network>
   <Shell>sh</Shell>
   <Privileged>false</Privileged>
-  <Support>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor</Support>
-  <Project>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor</Project>
+  <Support>https://github.com/EdLaughton/UPC-monitor</Support>
+  <Project>https://github.com/EdLaughton/UPC-monitor</Project>
   <Overview>Polls official UPC Decisions and Orders, mirrors official PDFs, and serves a simple static index plus latest.json.</Overview>
   <Category>Productivity: Tools:</Category>
   <WebUI>http://[IP]:[PORT:8000]/</WebUI>
