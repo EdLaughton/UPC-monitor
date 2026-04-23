@@ -102,6 +102,46 @@ async def settle_page(page, settings: Settings) -> None:
     await page.wait_for_timeout(500)
 
 
+def is_unsubmitted_decisions_form(html: str) -> bool:
+    lower = html.lower()
+    return (
+        "edit-submit-collection-of-judgements" in lower
+        and (
+            "please submit the form below to get your result" in lower
+            or "select any filter and click on apply to see results" in lower
+        )
+    )
+
+
+async def submit_decisions_form(page, settings: Settings) -> bool:
+    """Submit the UPC exposed filter form when it renders without results.
+
+    Some UPC responses render the Decisions and Orders search form plus the
+    warning "Please submit the form below to get your result" instead of the
+    result table. The debug HTML shows the relevant submit input is
+    edit-submit-collection-of-judgements. Treat that as a normal pre-results
+    state and click Apply before concluding that discovery failed.
+    """
+    selectors = (
+        "#edit-submit-collection-of-judgements",
+        "input[data-drupal-selector='edit-submit-collection-of-judgements']",
+        "form[data-drupal-selector='views-exposed-form-collection-of-judgements-page-1'] input[type='submit'][value='Apply']",
+        "form.views-exposed-form-no-auto-submit input[type='submit'][value='Apply']",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if not await locator.count():
+                continue
+            logger.info("submitting UPC Decisions and Orders filter form via %s", selector)
+            await locator.click(timeout=settings.navigation_timeout_ms)
+            await settle_page(page, settings)
+            return True
+        except Exception as exc:
+            logger.debug("could not submit UPC decisions form using %s: %s", selector, exc)
+    return False
+
+
 async def click_next_pager(page, settings: Settings) -> bool:
     """Advance by clicking the rendered Drupal pager's next link.
 
@@ -148,6 +188,30 @@ def cap_items(items: list[IndexItem], settings: Settings) -> list[IndexItem]:
     return items
 
 
+async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, page_number: int) -> tuple[str, list[IndexItem]]:
+    html = await page.content()
+    if is_failure_page(html):
+        await save_debug(debug_dir, f"index-page-{page_number}-failure", html, page)
+        raise ScraperError(f"UPC index page {page_number} appears to be unavailable or challenged")
+
+    page_items = parse_index_page(html, page.url)
+    if page_items or not is_unsubmitted_decisions_form(html):
+        return html, page_items
+
+    logger.info("UPC index page %s rendered the unsubmitted search form; clicking Apply", page_number)
+    submitted = await submit_decisions_form(page, settings)
+    if not submitted:
+        return html, page_items
+
+    html = await page.content()
+    if is_failure_page(html):
+        await save_debug(debug_dir, f"index-page-{page_number}-post-submit-failure", html, page)
+        raise ScraperError(f"UPC index page {page_number} became unavailable or challenged after form submit")
+    page_items = parse_index_page(html, page.url)
+    logger.info("UPC index page %s yielded %s item(s) after form submit", page_number, len(page_items))
+    return html, page_items
+
+
 async def discover_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
     sources = discovery_sources(settings)
 
@@ -169,27 +233,15 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
                 await accept_cookies(page)
                 await settle_page(page, settings)
-                html = await page.content()
+                html, page_items = await parse_or_submit_index_page(page, settings, debug_dir, page_number)
 
-                if is_failure_page(html):
-                    await save_debug(debug_dir, f"index-page-{page_number}-failure", html, page)
-                    if items:
-                        logger.warning(
-                            "UPC index page %s failed after %s item(s) had already been discovered; using partial results",
-                            page_number,
-                            len(items),
-                        )
-                        break
-                    raise ScraperError(f"UPC index page {page_number} appears to be unavailable or challenged")
-
-                page_items = parse_index_page(html, page.url)
                 if page_number == 0 and not page_items:
                     await save_debug(
                         debug_dir,
                         f"index-page-0-no-results-{debug_name(source_url)}",
                         html,
                         page,
-                        "No decision rows were found in the first index page. Trying next source candidate if available.",
+                        "No decision rows were found in the first index page even after any available form submit.",
                     )
                     raise ScraperError("no decision rows found on the first UPC index page")
 
