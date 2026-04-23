@@ -396,6 +396,9 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                     now = utc_now()
                     if db.has_seen(item.item_key):
                         db.touch_seen(item, now)
+                        if db.needs_enrichment(item.item_key):
+                            logger.info("retrying enrichment for seen incomplete item %s", item.item_key)
+                            await ingest_item(context, db, settings, item, debug_run_dir)
                         continue
                     try:
                         await ingest_item(context, db, settings, item, debug_run_dir)
