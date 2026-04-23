@@ -179,6 +179,26 @@ class Database:
             row = conn.execute("SELECT 1 FROM seen_items WHERE item_key = ?", (item_key,)).fetchone()
             return row is not None
 
+    def needs_enrichment(self, item_key: str) -> bool:
+        """Return True for seen items that still lack a mirrored PDF or had errors.
+
+        A detail page can be temporarily unavailable or challenged. In that case
+        the scraper persists index metadata and marks the item seen so it is not
+        re-alerted, but later runs should still retry detail/PDF enrichment.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT pdf_url_mirror, pdf_sha256, last_error
+                FROM decisions
+                WHERE item_key = ?
+                """,
+                (item_key,),
+            ).fetchone()
+            if row is None:
+                return True
+            return not row["pdf_url_mirror"] or not row["pdf_sha256"] or bool(row["last_error"])
+
     def mark_seen(self, item: IndexItem, now: str, bootstrapped: bool = False) -> None:
         bootstrapped_at = now if bootstrapped else None
         snapshot = json.dumps(item.source_index_snapshot, ensure_ascii=False, sort_keys=True)
