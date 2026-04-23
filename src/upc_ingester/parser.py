@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup, Tag
 
@@ -161,11 +161,23 @@ def _value_for(values: dict[str, str], *needles: str) -> str:
 
 
 def _extract_refs(text: str) -> tuple[str, str, str]:
-    refs = re.findall(r"\b[A-Z][A-Za-z]*_[0-9]+/[0-9]{4}\b|\bUPC_(?:CFI|CoA)_[0-9]+/[0-9]{4}\b", text)
-    case_number = next((ref for ref in refs if ref.startswith("UPC_")), "")
+    # UPC data is not fully consistent: recent rows may use underscores
+    # (UPC_CFI_472/2024), hyphens (UPC-CFI-461/2025), or padded CoA
+    # numbers (UPC-COA-0000901/2025). Keep the original display value.
+    refs = re.findall(
+        r"\b(?:"
+        r"UPC[-_](?:CFI|CoA|COA)[-_]?[0-9]+/[0-9]{4}|"
+        r"[A-Z][A-Za-z]*_[0-9]+/[0-9]{4}"
+        r")\b",
+        text,
+        flags=re.I,
+    )
+    case_number = next((ref for ref in refs if re.match(r"^UPC[-_]", ref, re.I)), "")
     order_ref = next((ref for ref in refs if ref.startswith(("ORD_", "DEC_"))), "")
-    registry = next((ref for ref in refs if not ref.startswith(("ORD_", "DEC_", "UPC_"))), "")
-    if not registry and refs:
+    registry = next((ref for ref in refs if not ref.startswith(("ORD_", "DEC_")) and not re.match(r"^UPC[-_](?:CFI|CoA|COA)", ref, re.I)), "")
+    if not registry and case_number:
+        registry = case_number
+    elif not registry and refs:
         registry = refs[0]
     return registry, order_ref, case_number
 
@@ -239,10 +251,31 @@ def extract_last_page(html: str) -> int:
     return max(pages) if pages else 0
 
 
+def extract_next_page_url(html: str, base_url: str) -> str:
+    """Return the actual UPC pager next URL, preserving Drupal query args.
+
+    The UPC view includes required default query parameters in its pager hrefs.
+    Building ?page=N by hand can yield empty pages, so discovery should follow
+    the rel=next / pager__item--next link emitted by the site.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    selectors = (
+        "li.pager__item--next a[href]",
+        "a[rel='next'][href]",
+        "a[title='Go to next page'][href]",
+    )
+    for selector in selectors:
+        link = soup.select_one(selector)
+        if link and link.get("href"):
+            return urljoin(base_url, link["href"])
+    return ""
+
+
 def _extract_labeled_values(lines: list[str]) -> dict[str, str]:
     labels = {normalise_heading(label): label for label in DETAIL_LABELS}
     values: dict[str, str] = {}
     i = 0
+    section_stops = {"headnotes", "keywords", "order documents", "decision documents", "back to decisions and orders"}
     while i < len(lines):
         key = labels.get(normalise_heading(lines[i]))
         if not key:
@@ -252,7 +285,7 @@ def _extract_labeled_values(lines: list[str]) -> dict[str, str]:
         i += 1
         while i < len(lines):
             heading = normalise_heading(lines[i])
-            if heading in labels or heading in {"headnotes", "keywords", "order documents"}:
+            if heading in labels or heading in section_stops:
                 break
             collected.append(lines[i])
             i += 1
@@ -277,11 +310,37 @@ def _extract_section(lines: list[str], heading: str, stops: set[str]) -> str:
     return "\n".join(collected).strip()
 
 
+def _extract_tile_section_text(soup: BeautifulSoup, heading: str) -> str:
+    """Extract text from the body of a UPC tile headed by `heading`.
+
+    This is more reliable than full-page line slicing for long headnotes because
+    it avoids footer/navigation text and tolerates empty sections.
+    """
+    wanted = normalise_heading(heading)
+    for h4 in soup.find_all(["h2", "h3", "h4", "h5"]):
+        if normalise_heading(h4.get_text(" ", strip=True)) != wanted:
+            continue
+        tile = h4.find_parent(["section", "footer"])
+        if not tile:
+            continue
+        body = tile.select_one(".tile__body")
+        if not body:
+            continue
+        return clean_multiline(body.get_text("\n", strip=True))
+    return ""
+
+
 def _keywords_list(raw: str) -> list[str]:
-    return [part.strip() for part in re.split(r"\s*;\s*", raw) if part.strip()]
+    text = clean_text(raw.replace("\n", " "))
+    # UPC keywords often use semicolons, en dashes or bullet-like separators.
+    parts = re.split(r"\s*;\s*|\s+–\s+|\s+-\s+", text)
+    return [part.strip() for part in parts if part.strip()]
 
 
 def _pdf_language(label: str, url: str) -> str:
+    match = re.search(r"\b([A-Z]{2})\s*pdf\b", label, flags=re.I)
+    if match:
+        return match.group(1).upper()
     match = re.search(r"\b([A-Z]{2})\b", label)
     if match:
         return match.group(1)
@@ -289,6 +348,70 @@ def _pdf_language(label: str, url: str) -> str:
     if match:
         return match.group(1).upper()
     return ""
+
+
+def is_official_upc_pdf_url(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.netloc or "").lower()
+    path = parsed.path.lower()
+    if host not in {
+        "unifiedpatentcourt.org",
+        "www.unifiedpatentcourt.org",
+        "unified-patent-court.org",
+        "www.unified-patent-court.org",
+    }:
+        return False
+    if not path.endswith(".pdf"):
+        return False
+    # Exclude generic site/legal-text PDFs and keep only UPC decision/order
+    # document storage locations observed on the detail pages.
+    return path.startswith("/sites/default/files/") and (
+        "/api_order/" in path
+        or "/api_decision/" in path
+        or "/upc_documents/" in path
+    )
+
+
+def _document_sections(soup: BeautifulSoup) -> list[Tag]:
+    sections: list[Tag] = []
+    for h4 in soup.find_all(["h2", "h3", "h4", "h5"]):
+        heading = normalise_heading(h4.get_text(" ", strip=True))
+        if heading not in {"order documents", "decision documents"}:
+            continue
+        section = h4.find_parent(["footer", "section"])
+        if section is not None:
+            sections.append(section)
+    return sections
+
+
+def _extract_pdf_links(soup: BeautifulSoup, base_url: str) -> list[PdfLink]:
+    pdf_links: list[PdfLink] = []
+    seen: set[str] = set()
+
+    # First pass: only the explicit Order Documents / Decision Documents tiles.
+    candidate_roots = _document_sections(soup)
+
+    # Fallback: some markup variants may not expose the heading wrapper as
+    # expected. If so, scan the judgment article, still filtering to official
+    # UPC decision/order PDF storage paths.
+    if not candidate_roots:
+        article = soup.select_one("article.node--type-judgement") or soup.find("main") or soup
+        candidate_roots = [article]
+
+    for root in candidate_roots:
+        for link in root.find_all("a", href=True):
+            href = link["href"]
+            if ".pdf" not in href.lower():
+                continue
+            absolute = urljoin(base_url, href)
+            if not is_official_upc_pdf_url(absolute):
+                continue
+            if absolute in seen:
+                continue
+            seen.add(absolute)
+            label = clean_text(link.get_text(" ", strip=True)) or clean_text(link.get("title", ""))
+            pdf_links.append(PdfLink(url=absolute, label=label, language=_pdf_language(label, absolute)))
+    return pdf_links
 
 
 def parse_detail_page(html: str, base_url: str) -> DetailMetadata:
@@ -301,17 +424,16 @@ def parse_detail_page(html: str, base_url: str) -> DetailMetadata:
     lines = visible_lines(html)
     values = _extract_labeled_values(lines)
 
-    headnote_raw = _extract_section(lines, "Headnotes", {"keywords", "order documents"})
-    keywords_raw = _extract_section(lines, "Keywords", {"order documents", "back to decisions and orders"})
-
-    pdf_links: list[PdfLink] = []
-    for link in soup.find_all("a", href=True):
-        href = link["href"]
-        if ".pdf" not in href.lower():
-            continue
-        absolute = urljoin(base_url, href)
-        label = clean_text(link.get_text(" ", strip=True))
-        pdf_links.append(PdfLink(url=absolute, label=label, language=_pdf_language(label, absolute)))
+    headnote_raw = _extract_tile_section_text(soup, "Headnotes") or _extract_section(
+        lines,
+        "Headnotes",
+        {"keywords", "order documents", "decision documents", "back to decisions and orders"},
+    )
+    keywords_raw = _extract_tile_section_text(soup, "Keywords") or _extract_section(
+        lines,
+        "Keywords",
+        {"order documents", "decision documents", "back to decisions and orders"},
+    )
 
     parties_raw = values.get("Parties", "")
     metadata = DetailMetadata(
@@ -331,6 +453,6 @@ def parse_detail_page(html: str, base_url: str) -> DetailMetadata:
         headnote_text=clean_text(headnote_raw.replace("\n", " ")),
         keywords_raw=keywords_raw,
         keywords_list=_keywords_list(keywords_raw),
-        pdf_links=pdf_links,
+        pdf_links=_extract_pdf_links(soup, base_url),
     )
     return metadata
