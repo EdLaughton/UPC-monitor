@@ -119,12 +119,13 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
                     language TEXT,
-                    pdf_url_official TEXT NOT NULL UNIQUE,
+                    pdf_url_official TEXT NOT NULL,
                     pdf_url_mirror TEXT,
                     pdf_sha256 TEXT,
                     file_path TEXT,
                     is_primary INTEGER NOT NULL DEFAULT 0,
-                    downloaded_at TEXT
+                    downloaded_at TEXT,
+                    UNIQUE(decision_id, pdf_url_official)
                 );
 
                 CREATE TABLE IF NOT EXISTS ingestion_runs (
@@ -143,6 +144,44 @@ class Database:
                 CREATE INDEX IF NOT EXISTS idx_seen_node ON seen_items(node_url);
                 """
             )
+            self._migrate_decision_documents_unique_constraint(conn)
+
+    def _migrate_decision_documents_unique_constraint(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'decision_documents'"
+        ).fetchone()
+        table_sql = str(row["sql"] if row else "")
+        if "pdf_url_official TEXT NOT NULL UNIQUE" not in table_sql:
+            return
+
+        conn.executescript(
+            """
+            ALTER TABLE decision_documents RENAME TO decision_documents_old;
+
+            CREATE TABLE decision_documents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                decision_id INTEGER NOT NULL REFERENCES decisions(id) ON DELETE CASCADE,
+                language TEXT,
+                pdf_url_official TEXT NOT NULL,
+                pdf_url_mirror TEXT,
+                pdf_sha256 TEXT,
+                file_path TEXT,
+                is_primary INTEGER NOT NULL DEFAULT 0,
+                downloaded_at TEXT,
+                UNIQUE(decision_id, pdf_url_official)
+            );
+
+            INSERT OR IGNORE INTO decision_documents (
+                id, decision_id, language, pdf_url_official, pdf_url_mirror,
+                pdf_sha256, file_path, is_primary, downloaded_at
+            )
+            SELECT id, decision_id, language, pdf_url_official, pdf_url_mirror,
+                   pdf_sha256, file_path, is_primary, downloaded_at
+            FROM decision_documents_old;
+
+            DROP TABLE decision_documents_old;
+            """
+        )
 
     def start_run(self, started_at: str, debug_dir: str) -> int:
         with self.connect() as conn:
@@ -180,7 +219,7 @@ class Database:
             return row is not None
 
     def needs_enrichment(self, item_key: str) -> bool:
-        """Return True for seen items that still lack a mirrored PDF or had errors.
+        """Return True for seen items that still lack a mirrored PDF/document row or had errors.
 
         A detail page can be temporarily unavailable or challenged. In that case
         the scraper persists index metadata and marks the item seen so it is not
@@ -189,15 +228,23 @@ class Database:
         with self.connect() as conn:
             row = conn.execute(
                 """
-                SELECT pdf_url_mirror, pdf_sha256, last_error
-                FROM decisions
-                WHERE item_key = ?
+                SELECT d.id, d.pdf_url_mirror, d.pdf_sha256, d.last_error,
+                       COUNT(dd.id) AS document_count
+                FROM decisions d
+                LEFT JOIN decision_documents dd ON dd.decision_id = d.id
+                WHERE d.item_key = ?
+                GROUP BY d.id
                 """,
                 (item_key,),
             ).fetchone()
             if row is None:
                 return True
-            return not row["pdf_url_mirror"] or not row["pdf_sha256"] or bool(row["last_error"])
+            return (
+                not row["pdf_url_mirror"]
+                or not row["pdf_sha256"]
+                or bool(row["last_error"])
+                or int(row["document_count"] or 0) == 0
+            )
 
     def mark_seen(self, item: IndexItem, now: str, bootstrapped: bool = False) -> None:
         bootstrapped_at = now if bootstrapped else None
@@ -271,8 +318,7 @@ class Database:
                         pdf_sha256, file_path, is_primary, downloaded_at
                     )
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(pdf_url_official) DO UPDATE SET
-                        decision_id = excluded.decision_id,
+                    ON CONFLICT(decision_id, pdf_url_official) DO UPDATE SET
                         language = excluded.language,
                         pdf_url_mirror = excluded.pdf_url_mirror,
                         pdf_sha256 = excluded.pdf_sha256,
