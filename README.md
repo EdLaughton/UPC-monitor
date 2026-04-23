@@ -76,10 +76,20 @@ Inside the image:
 ```bash
 python -m upc_ingester serve
 python -m upc_ingester run-once
+python -m upc_ingester backfill
+python -m upc_ingester backfill --index-only
 python -m upc_ingester bootstrap
 ```
 
 `bootstrap` crawls the current UPC index and marks visible items as seen without downloading PDFs. Use it once if you only want future UPC publications mirrored.
+
+`backfill --index-only` crawls the full UPC index and upserts one SQLite decision row per index item using only index-table metadata. It does not open detail pages and does not download PDFs; rows are left with `last_error="index-only backfill; detail not yet fetched"` so they remain eligible for later enrichment.
+
+Example full catalogue index-only backfill:
+
+```bash
+python -m upc_ingester backfill --index-only
+```
 
 For local development without installing the package:
 
@@ -106,7 +116,8 @@ Environment variables:
 - `LOG_LEVEL`: Python log level, default `INFO`
 - `SOURCE_URL`: primary UPC source URL, default `https://www.unifiedpatentcourt.org/en/decisions-and-orders`
 - `FALLBACK_SOURCE_URL`: fallback official alias, default `https://www.unified-patent-court.org/en/decisions-and-orders`
-- `MAX_PAGES`: optional discovery cap for debugging, default unlimited
+- `MAX_PAGES`: index page discovery cap, default `1` for gentle hourly polling; `backfill` is uncapped
+- `MAX_ITEMS`: item discovery cap, default `10` for gentle hourly polling; `backfill` is uncapped
 
 ## Unraid Compose Alternative
 
@@ -134,6 +145,7 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 
 - The ingester uses Playwright Chromium for both page access and PDF downloads so cookies and headers match the browser session.
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
+- Use `python -m upc_ingester backfill --index-only` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only and deliberately avoids detail-page and PDF network requests.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - PDF bytes are validated as PDFs and hashed with SHA-256 before an item is marked seen.
 

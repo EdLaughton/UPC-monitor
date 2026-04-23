@@ -24,14 +24,18 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers.add_parser("serve", help="start the scheduler and static mirror server")
     subparsers.add_parser("run-once", help="run one normal ingestion pass")
     subparsers.add_parser("bootstrap", help="mark all currently visible UPC items as already seen")
-
     backfill = subparsers.add_parser("backfill", help="run a deliberate broader one-off crawl for statistics/backfill")
-    backfill.add_argument("--max-pages", type=int, default=5, help="maximum UPC index pages to inspect")
-    backfill.add_argument("--max-items", type=int, default=100, help="maximum UPC items to ingest")
+    backfill.add_argument("--max-pages", type=int, default=0, help="maximum UPC index pages to inspect; 0 means unlimited")
+    backfill.add_argument("--max-items", type=int, default=0, help="maximum UPC items to ingest; 0 means unlimited")
     backfill.add_argument(
         "--write-all-json",
         action="store_true",
         help="also write /all.json; /all.ndjson is always written",
+    )
+    backfill.add_argument(
+        "--index-only",
+        action="store_true",
+        help="store rows from index metadata only; do not fetch detail pages or PDFs",
     )
     return parser
 
@@ -103,7 +107,7 @@ async def main_async() -> int:
             max_items=args.max_items,
             write_all_json=args.write_all_json,
         )
-        result = await run_ingestion(backfill_settings, bootstrap=False)
+        result = await run_ingestion(backfill_settings, bootstrap=False, index_only=args.index_only)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
     raise ValueError(f"unknown command: {command}")

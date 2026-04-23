@@ -41,6 +41,7 @@ DECISION_COLUMNS = (
     "ingested_at",
     "alerted_at",
     "last_error",
+    "source_index_snapshot",
 )
 
 
@@ -112,7 +113,8 @@ class Database:
                     last_seen_at TEXT,
                     ingested_at TEXT,
                     alerted_at TEXT,
-                    last_error TEXT
+                    last_error TEXT,
+                    source_index_snapshot TEXT NOT NULL DEFAULT '{}'
                 );
 
                 CREATE TABLE IF NOT EXISTS decision_documents (
@@ -145,6 +147,12 @@ class Database:
                 """
             )
             self._migrate_decision_documents_unique_constraint(conn)
+            columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(decisions)").fetchall()
+            }
+            if "source_index_snapshot" not in columns:
+                conn.execute("ALTER TABLE decisions ADD COLUMN source_index_snapshot TEXT NOT NULL DEFAULT '{}'")
 
     def _migrate_decision_documents_unique_constraint(self, conn: sqlite3.Connection) -> None:
         row = conn.execute(
@@ -301,6 +309,36 @@ class Database:
             if row is None:
                 raise RuntimeError("decision upsert did not return an id")
             return int(row["id"])
+
+    def get_decision(self, item_key: str) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM decisions WHERE item_key = ?", (item_key,)).fetchone()
+            if row is None:
+                return None
+            item = dict(row)
+            for column in JSON_COLUMNS:
+                try:
+                    item[column] = json.loads(item.get(column) or "[]")
+                except json.JSONDecodeError:
+                    item[column] = []
+            docs = conn.execute(
+                """
+                SELECT language, pdf_url_official, pdf_url_mirror, pdf_sha256, file_path,
+                       is_primary, downloaded_at
+                FROM decision_documents
+                WHERE decision_id = ?
+                ORDER BY is_primary DESC, id ASC
+                """,
+                (item["id"],),
+            ).fetchall()
+            item["documents"] = [
+                {
+                    **dict(doc),
+                    "is_primary": bool(doc["is_primary"]),
+                }
+                for doc in docs
+            ]
+            return item
 
     def replace_documents(self, decision_id: int, documents: list[dict[str, Any]]) -> None:
         with self.connect() as conn:

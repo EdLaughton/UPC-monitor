@@ -188,6 +188,20 @@ def cap_items(items: list[IndexItem], settings: Settings) -> list[IndexItem]:
     return items
 
 
+def needs_enrichment(decision: dict[str, object] | None) -> bool:
+    if decision is None:
+        return True
+    if str(decision.get("last_error") or "").strip():
+        return True
+    documents = decision.get("documents")
+    if not documents:
+        return True
+    return not (
+        str(decision.get("pdf_url_mirror") or "").strip()
+        and str(decision.get("pdf_sha256") or "").strip()
+    )
+
+
 async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, page_number: int) -> tuple[str, list[IndexItem]]:
     html = await page.content()
     if is_failure_page(html):
@@ -268,7 +282,13 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     cumulative,
                 )
                 items.extend(page_items)
+                logger.info(
+                    "discovery progress: %s page(s), %s cumulative item(s)",
+                    page_number + 1,
+                    len(items),
+                )
                 if settings.max_items and len(items) >= settings.max_items:
+                    logger.info("stopping discovery at MAX_ITEMS=%s", settings.max_items)
                     break
 
                 if settings.max_pages and page_number + 1 >= settings.max_pages:
@@ -296,6 +316,7 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 url = next_url
                 page_number += 1
 
+            return cap_items(dedupe_items(items), settings)
             return cap_items(dedupe_items(items), settings)
         except Exception as exc:
             last_error = exc
@@ -471,7 +492,88 @@ async def ingest_item(context, db: Database, settings: Settings, item: IndexItem
         logger.warning("ingested %s metadata without mirrored PDFs", item.item_key)
 
 
-async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str, int | str]:
+def upsert_index_only_item(db: Database, item: IndexItem, now: str) -> None:
+    party_data = parse_parties(item.parties_raw)
+    decision_values = {
+        "item_key": item.item_key,
+        "title_raw": item.title_raw,
+        "case_name_raw": item.parties_raw,
+        "parties_raw": item.parties_raw,
+        "parties_json": party_data.parties_json,
+        "party_names_all": party_data.party_names_all,
+        "party_names_normalised": party_data.party_names_normalised,
+        "primary_adverse_caption": party_data.primary_adverse_caption,
+        "adverse_pair_key": party_data.adverse_pair_key,
+        "division": item.division,
+        "panel": "",
+        "case_number": item.case_number,
+        "registry_number": item.registry_number,
+        "order_or_decision_number": item.order_or_decision_number,
+        "decision_date": item.decision_date,
+        "document_type": item.title_raw,
+        "type_of_action": item.type_of_action,
+        "language": "",
+        "headnote_raw": "",
+        "headnote_text": "",
+        "keywords_raw": "",
+        "keywords_list": [],
+        "pdf_url_official": "",
+        "pdf_url_mirror": "",
+        "node_url": item.node_url,
+        "pdf_sha256": "",
+        "first_seen_at": now,
+        "last_seen_at": now,
+        "ingested_at": now,
+        "alerted_at": "",
+        "last_error": "index-only backfill; detail not yet fetched",
+        "source_index_snapshot": json.dumps(item.source_index_snapshot, ensure_ascii=False, sort_keys=True),
+    }
+    decision_id = db.upsert_decision(decision_values)
+    db.replace_documents(decision_id, [])
+    db.mark_seen(item, now, bootstrapped=False)
+
+
+async def ingest_discovered_items(
+    context,
+    db: Database,
+    settings: Settings,
+    items: list[IndexItem],
+    debug_run_dir: Path,
+    index_only: bool = False,
+) -> tuple[int, int, list[str]]:
+    new_count = 0
+    skipped_complete_count = 0
+    item_errors: list[str] = []
+    for item in items:
+        now = utc_now()
+        decision = db.get_decision(item.item_key)
+        if not needs_enrichment(decision):
+            db.touch_seen(item, now)
+            skipped_complete_count += 1
+            continue
+        try:
+            if index_only:
+                upsert_index_only_item(db, item, now)
+                logger.info("index-only upserted %s", item.item_key)
+            else:
+                await ingest_item(context, db, settings, item, debug_run_dir)
+            new_count += 1
+        except Exception as exc:
+            logger.exception("failed to ingest %s", item.item_key)
+            item_errors.append(f"{item.item_key}: {exc}")
+            await save_debug(
+                debug_run_dir,
+                f"{item.item_key}-error",
+                note=json.dumps({"item": item.__dict__, "error": str(exc)}, ensure_ascii=False, indent=2),
+            )
+    return new_count, skipped_complete_count, item_errors
+
+
+async def run_ingestion(
+    settings: Settings,
+    bootstrap: bool = False,
+    index_only: bool = False,
+) -> dict[str, int | str]:
     settings.ensure_dirs()
     db = Database(settings.db_path)
     db.init()
@@ -484,6 +586,7 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
     run_db_id = db.start_run(started_at, str(debug_run_dir))
     discovered_count = 0
     new_count = 0
+    skipped_complete_count = 0
     item_errors: list[str] = []
 
     try:
@@ -519,31 +622,23 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                     render_outputs(db, settings)
                     return {"status": "success", "discovered_count": discovered_count, "new_count": 0}
 
-                for item in items:
-                    now = utc_now()
-                    if db.has_seen(item.item_key):
-                        db.touch_seen(item, now)
-                        if db.needs_enrichment(item.item_key):
-                            logger.info("retrying enrichment for seen incomplete item %s", item.item_key)
-                            await ingest_item(context, db, settings, item, debug_run_dir)
-                            render_outputs(db, settings)
-                        continue
-                    try:
-                        await ingest_item(context, db, settings, item, debug_run_dir)
-                        new_count += 1
-                        render_outputs(db, settings)
-                    except Exception as exc:
-                        logger.exception("failed to persist %s", item.item_key)
-                        item_errors.append(f"{item.item_key}: {exc}")
-                        await save_debug(
-                            debug_run_dir,
-                            f"{item.item_key}-error",
-                            note=json.dumps({"item": item.__dict__, "error": str(exc)}, ensure_ascii=False, indent=2),
-                        )
+                new_count, skipped_complete_count, item_errors = await ingest_discovered_items(
+                    context,
+                    db,
+                    settings,
+                    items,
+                    debug_run_dir,
+                    index_only=index_only,
+                )
             finally:
                 await context.close()
                 await browser.close()
 
+        render_outputs(db, settings)
+        if index_only:
+            logger.info("index-only inserted/updated %s item(s)", new_count)
+        if skipped_complete_count:
+            logger.info("skipped %s complete item(s)", skipped_complete_count)
         status = "success" if not item_errors else "partial_success"
         db.finish_run(
             run_db_id,
@@ -553,8 +648,12 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
             new_count,
             "\n".join(item_errors),
         )
-        render_outputs(db, settings)
-        return {"status": status, "discovered_count": discovered_count, "new_count": new_count}
+        return {
+            "status": status,
+            "discovered_count": discovered_count,
+            "new_count": new_count,
+            "skipped_complete_count": skipped_complete_count,
+        }
     except Exception as exc:
         logger.exception("ingestion run failed")
         db.finish_run(run_db_id, utc_now(), "failed", discovered_count, new_count, str(exc))
@@ -562,5 +661,5 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
         raise
 
 
-def run_ingestion_sync(settings: Settings, bootstrap: bool = False) -> dict[str, int | str]:
-    return asyncio.run(run_ingestion(settings, bootstrap=bootstrap))
+def run_ingestion_sync(settings: Settings, bootstrap: bool = False, index_only: bool = False) -> dict[str, int | str]:
+    return asyncio.run(run_ingestion(settings, bootstrap=bootstrap, index_only=index_only))
