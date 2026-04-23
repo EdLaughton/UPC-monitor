@@ -93,6 +93,13 @@ def dedupe_items(items: list[IndexItem]) -> list[IndexItem]:
     return deduped
 
 
+def cap_items(items: list[IndexItem], settings: Settings) -> list[IndexItem]:
+    if settings.max_items and len(items) > settings.max_items:
+        logger.info("limiting discovery to MAX_ITEMS=%s latest item(s)", settings.max_items)
+        return items[: settings.max_items]
+    return items
+
+
 async def discover_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
     sources = [settings.source_url]
     if settings.fallback_source_url and settings.fallback_source_url != settings.source_url:
@@ -157,6 +164,8 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
 
                 logger.info("index page %s yielded %s items", page_number, len(page_items))
                 items.extend(page_items)
+                if settings.max_items and len(items) >= settings.max_items:
+                    break
 
                 if settings.max_pages and page_number + 1 >= settings.max_pages:
                     logger.info("stopping discovery at MAX_PAGES=%s", settings.max_pages)
@@ -168,7 +177,7 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 url = next_url
                 page_number += 1
 
-            return dedupe_items(items)
+            return cap_items(dedupe_items(items), settings)
         except Exception as exc:
             last_error = exc
             if items:
@@ -178,7 +187,7 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     len(items),
                     exc,
                 )
-                return dedupe_items(items)
+                return cap_items(dedupe_items(items), settings)
             logger.warning("discovery failed for %s: %s", source_url, exc)
         finally:
             await page.close()
@@ -347,8 +356,7 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
     settings.ensure_dirs()
     db = Database(settings.db_path)
     db.init()
-    if not (settings.public_dir / "latest.json").exists():
-        render_outputs(db, settings.public_dir)
+    render_outputs(db, settings.public_dir)
 
     this_run_id = run_id()
     debug_run_dir = settings.debug_dir / this_run_id
@@ -399,10 +407,12 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                         if db.needs_enrichment(item.item_key):
                             logger.info("retrying enrichment for seen incomplete item %s", item.item_key)
                             await ingest_item(context, db, settings, item, debug_run_dir)
+                            render_outputs(db, settings.public_dir)
                         continue
                     try:
                         await ingest_item(context, db, settings, item, debug_run_dir)
                         new_count += 1
+                        render_outputs(db, settings.public_dir)
                     except Exception as exc:
                         logger.exception("failed to persist %s", item.item_key)
                         item_errors.append(f"{item.item_key}: {exc}")
