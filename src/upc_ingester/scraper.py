@@ -317,7 +317,6 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 page_number += 1
 
             return cap_items(dedupe_items(items), settings)
-            return cap_items(dedupe_items(items), settings)
         except Exception as exc:
             last_error = exc
             if items:
@@ -481,6 +480,7 @@ async def ingest_item(context, db: Database, settings: Settings, item: IndexItem
         "ingested_at": now,
         "alerted_at": now,
         "last_error": last_error,
+        "source_index_snapshot": json.dumps(item.source_index_snapshot, ensure_ascii=False, sort_keys=True),
     }
     decision_id = db.upsert_decision(decision_values)
     if documents:
@@ -494,42 +494,17 @@ async def ingest_item(context, db: Database, settings: Settings, item: IndexItem
 
 def upsert_index_only_item(db: Database, item: IndexItem, now: str) -> None:
     party_data = parse_parties(item.parties_raw)
-    decision_values = {
-        "item_key": item.item_key,
-        "title_raw": item.title_raw,
-        "case_name_raw": item.parties_raw,
-        "parties_raw": item.parties_raw,
-        "parties_json": party_data.parties_json,
-        "party_names_all": party_data.party_names_all,
-        "party_names_normalised": party_data.party_names_normalised,
-        "primary_adverse_caption": party_data.primary_adverse_caption,
-        "adverse_pair_key": party_data.adverse_pair_key,
-        "division": item.division,
-        "panel": "",
-        "case_number": item.case_number,
-        "registry_number": item.registry_number,
-        "order_or_decision_number": item.order_or_decision_number,
-        "decision_date": item.decision_date,
-        "document_type": item.title_raw,
-        "type_of_action": item.type_of_action,
-        "language": "",
-        "headnote_raw": "",
-        "headnote_text": "",
-        "keywords_raw": "",
-        "keywords_list": [],
-        "pdf_url_official": "",
-        "pdf_url_mirror": "",
-        "node_url": item.node_url,
-        "pdf_sha256": "",
-        "first_seen_at": now,
-        "last_seen_at": now,
-        "ingested_at": now,
-        "alerted_at": "",
-        "last_error": "index-only backfill; detail not yet fetched",
-        "source_index_snapshot": json.dumps(item.source_index_snapshot, ensure_ascii=False, sort_keys=True),
-    }
-    decision_id = db.upsert_decision(decision_values)
-    db.replace_documents(decision_id, [])
+    db.upsert_index_only_decision(
+        item,
+        {
+            "parties_json": party_data.parties_json,
+            "party_names_all": party_data.party_names_all,
+            "party_names_normalised": party_data.party_names_normalised,
+            "primary_adverse_caption": party_data.primary_adverse_caption,
+            "adverse_pair_key": party_data.adverse_pair_key,
+        },
+        now,
+    )
     db.mark_seen(item, now, bootstrapped=False)
 
 
@@ -548,6 +523,7 @@ async def ingest_discovered_items(
         now = utc_now()
         decision = db.get_decision(item.item_key)
         if not needs_enrichment(decision):
+            db.mark_seen(item, now)
             db.touch_seen(item, now)
             skipped_complete_count += 1
             continue

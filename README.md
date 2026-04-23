@@ -83,12 +83,18 @@ python -m upc_ingester bootstrap
 
 `bootstrap` crawls the current UPC index and marks visible items as seen without downloading PDFs. Use it once if you only want future UPC publications mirrored.
 
-`backfill --index-only` crawls the full UPC index and upserts one SQLite decision row per index item using only index-table metadata. It does not open detail pages and does not download PDFs; rows are left with `last_error="index-only backfill; detail not yet fetched"` so they remain eligible for later enrichment.
+`backfill --index-only` crawls the UPC index and stores one SQLite decision row per index item using only index-table metadata. It does not open detail pages and does not download PDFs. New rows are left with `last_error="index-only backfill; detail not yet fetched"` so they remain eligible for later enrichment. Existing complete rows are skipped, and existing incomplete rows only have safe index metadata refreshed; mirrored PDF, hash, document, headnote, keyword, language, panel, and specific error fields are preserved.
 
 Example full catalogue index-only backfill:
 
 ```bash
-python -m upc_ingester backfill --index-only
+python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
+```
+
+Docker example against the persistent `/data` volume:
+
+```bash
+docker exec -it upc-monitor python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
 ```
 
 For local development without installing the package:
@@ -145,7 +151,7 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 
 - The ingester uses Playwright Chromium for both page access and PDF downloads so cookies and headers match the browser session.
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
-- Use `python -m upc_ingester backfill --index-only` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only and deliberately avoids detail-page and PDF network requests.
+- Use `python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - PDF bytes are validated as PDFs and hashed with SHA-256 before an item is marked seen.
 

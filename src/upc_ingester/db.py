@@ -46,6 +46,7 @@ DECISION_COLUMNS = (
 
 
 JSON_COLUMNS = {"parties_json", "party_names_all", "party_names_normalised", "keywords_list"}
+INDEX_ONLY_LAST_ERROR = "index-only backfill; detail not yet fetched"
 
 
 class Database:
@@ -279,8 +280,8 @@ class Database:
                 (item.node_url, now, snapshot, item.item_key),
             )
             conn.execute(
-                "UPDATE decisions SET last_seen_at = ? WHERE item_key = ?",
-                (now, item.item_key),
+                "UPDATE decisions SET last_seen_at = ?, source_index_snapshot = ? WHERE item_key = ?",
+                (now, snapshot, item.item_key),
             )
 
     def upsert_decision(self, values: dict[str, Any]) -> int:
@@ -308,6 +309,129 @@ class Database:
             row = conn.execute("SELECT id FROM decisions WHERE item_key = ?", (serialised["item_key"],)).fetchone()
             if row is None:
                 raise RuntimeError("decision upsert did not return an id")
+            return int(row["id"])
+
+    def upsert_index_only_decision(self, item: IndexItem, party_values: dict[str, Any], now: str) -> int:
+        snapshot = json.dumps(item.source_index_snapshot, ensure_ascii=False, sort_keys=True)
+        serialised_parties = {
+            key: json.dumps(party_values.get(key, []), ensure_ascii=False)
+            for key in ("parties_json", "party_names_all", "party_names_normalised")
+        }
+        with self.connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO decisions (
+                    item_key, title_raw, case_name_raw, parties_raw,
+                    parties_json, party_names_all, party_names_normalised,
+                    primary_adverse_caption, adverse_pair_key,
+                    division, panel, case_number, registry_number,
+                    order_or_decision_number, decision_date, document_type,
+                    type_of_action, language, headnote_raw, headnote_text,
+                    keywords_raw, keywords_list, pdf_url_official,
+                    pdf_url_mirror, node_url, pdf_sha256, first_seen_at,
+                    last_seen_at, ingested_at, alerted_at, last_error,
+                    source_index_snapshot
+                )
+                VALUES (
+                    ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?,
+                    ?, '', ?, ?,
+                    ?, ?, ?,
+                    ?, '', '', '',
+                    '', '[]', '',
+                    '', ?, '', ?,
+                    ?, ?, '', ?,
+                    ?
+                )
+                ON CONFLICT(item_key) DO UPDATE SET
+                    node_url = COALESCE(NULLIF(excluded.node_url, ''), decisions.node_url),
+                    decision_date = COALESCE(NULLIF(excluded.decision_date, ''), decisions.decision_date),
+                    registry_number = COALESCE(NULLIF(excluded.registry_number, ''), decisions.registry_number),
+                    case_number = COALESCE(NULLIF(excluded.case_number, ''), decisions.case_number),
+                    order_or_decision_number = COALESCE(
+                        NULLIF(excluded.order_or_decision_number, ''),
+                        decisions.order_or_decision_number
+                    ),
+                    division = COALESCE(NULLIF(excluded.division, ''), decisions.division),
+                    type_of_action = COALESCE(NULLIF(excluded.type_of_action, ''), decisions.type_of_action),
+                    title_raw = CASE
+                        WHEN COALESCE(decisions.title_raw, '') = '' THEN excluded.title_raw
+                        ELSE decisions.title_raw
+                    END,
+                    document_type = CASE
+                        WHEN COALESCE(decisions.document_type, '') = '' THEN excluded.document_type
+                        ELSE decisions.document_type
+                    END,
+                    case_name_raw = CASE
+                        WHEN COALESCE(decisions.case_name_raw, '') = '' THEN excluded.case_name_raw
+                        ELSE decisions.case_name_raw
+                    END,
+                    parties_raw = CASE
+                        WHEN COALESCE(decisions.parties_raw, '') = '' THEN excluded.parties_raw
+                        ELSE decisions.parties_raw
+                    END,
+                    parties_json = CASE
+                        WHEN COALESCE(decisions.parties_json, '') IN ('', '[]') THEN excluded.parties_json
+                        ELSE decisions.parties_json
+                    END,
+                    party_names_all = CASE
+                        WHEN COALESCE(decisions.party_names_all, '') IN ('', '[]') THEN excluded.party_names_all
+                        ELSE decisions.party_names_all
+                    END,
+                    party_names_normalised = CASE
+                        WHEN COALESCE(decisions.party_names_normalised, '') IN ('', '[]') THEN excluded.party_names_normalised
+                        ELSE decisions.party_names_normalised
+                    END,
+                    primary_adverse_caption = CASE
+                        WHEN COALESCE(decisions.primary_adverse_caption, '') = '' THEN excluded.primary_adverse_caption
+                        ELSE decisions.primary_adverse_caption
+                    END,
+                    adverse_pair_key = CASE
+                        WHEN COALESCE(decisions.adverse_pair_key, '') = '' THEN excluded.adverse_pair_key
+                        ELSE decisions.adverse_pair_key
+                    END,
+                    last_seen_at = excluded.last_seen_at,
+                    ingested_at = CASE
+                        WHEN COALESCE(decisions.ingested_at, '') = '' THEN excluded.ingested_at
+                        ELSE decisions.ingested_at
+                    END,
+                    last_error = CASE
+                        WHEN COALESCE(decisions.last_error, '') = '' THEN excluded.last_error
+                        WHEN decisions.last_error = ? THEN excluded.last_error
+                        ELSE decisions.last_error
+                    END,
+                    source_index_snapshot = excluded.source_index_snapshot
+                """,
+                (
+                    item.item_key,
+                    item.title_raw,
+                    item.parties_raw,
+                    item.parties_raw,
+                    serialised_parties["parties_json"],
+                    serialised_parties["party_names_all"],
+                    serialised_parties["party_names_normalised"],
+                    party_values.get("primary_adverse_caption", ""),
+                    party_values.get("adverse_pair_key", ""),
+                    item.division,
+                    item.case_number,
+                    item.registry_number,
+                    item.order_or_decision_number,
+                    item.decision_date,
+                    item.title_raw,
+                    item.type_of_action,
+                    item.node_url,
+                    now,
+                    now,
+                    now,
+                    INDEX_ONLY_LAST_ERROR,
+                    snapshot,
+                    INDEX_ONLY_LAST_ERROR,
+                ),
+            )
+            row = conn.execute("SELECT id FROM decisions WHERE item_key = ?", (item.item_key,)).fetchone()
+            if row is None:
+                raise RuntimeError("index-only decision upsert did not return an id")
             return int(row["id"])
 
     def get_decision(self, item_key: str) -> dict[str, Any] | None:
