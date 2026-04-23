@@ -373,3 +373,41 @@ class Database:
                 ]
                 decisions.append(item)
             return decisions
+
+    def get_latest_run(self) -> dict[str, Any] | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT id, started_at, finished_at, status, discovered_count,
+                       new_count, failure_summary, debug_dir
+                FROM ingestion_runs
+                ORDER BY id DESC
+                LIMIT 1
+                """
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_status_counts(self) -> dict[str, int]:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                SELECT
+                    COUNT(*) AS item_count,
+                    SUM(CASE WHEN pdf_url_mirror IS NOT NULL AND pdf_url_mirror != '' THEN 1 ELSE 0 END) AS items_with_mirror_pdf,
+                    SUM(CASE WHEN last_error IS NOT NULL AND last_error != '' THEN 1 ELSE 0 END) AS items_with_errors,
+                    SUM(CASE WHEN headnote_text IS NOT NULL AND headnote_text != '' THEN 1 ELSE 0 END) AS items_with_headnotes,
+                    SUM(CASE WHEN keywords_raw IS NOT NULL AND keywords_raw != '' THEN 1 ELSE 0 END) AS items_with_keywords,
+                    COUNT(DISTINCT decision_date) AS decision_date_count
+                FROM decisions
+                """
+            ).fetchone()
+            if row is None:
+                return {
+                    "item_count": 0,
+                    "items_with_mirror_pdf": 0,
+                    "items_with_errors": 0,
+                    "items_with_headnotes": 0,
+                    "items_with_keywords": 0,
+                    "decision_date_count": 0,
+                }
+            return {key: int(row[key] or 0) for key in row.keys()}
