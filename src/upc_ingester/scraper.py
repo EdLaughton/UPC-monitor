@@ -6,6 +6,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse, urlunparse
 
 from .config import Settings
 from .db import Database
@@ -40,6 +41,25 @@ def run_id() -> str:
 def debug_name(value: str) -> str:
     value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value).strip("-")
     return value[:90] or "artifact"
+
+
+def strip_query(url: str) -> str:
+    parsed = urlparse(url)
+    return urlunparse(parsed._replace(query="", fragment=""))
+
+
+def discovery_sources(settings: Settings) -> list[str]:
+    candidates = [settings.source_url, strip_query(settings.source_url)]
+    if settings.fallback_source_url:
+        candidates.extend([settings.fallback_source_url, strip_query(settings.fallback_source_url)])
+    seen: set[str] = set()
+    unique: list[str] = []
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        unique.append(candidate)
+    return unique
 
 
 async def save_debug(debug_dir: Path, name: str, html: str = "", page=None, note: str = "") -> None:
@@ -101,9 +121,7 @@ def cap_items(items: list[IndexItem], settings: Settings) -> list[IndexItem]:
 
 
 async def discover_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
-    sources = [settings.source_url]
-    if settings.fallback_source_url and settings.fallback_source_url != settings.source_url:
-        sources.append(settings.fallback_source_url)
+    sources = discovery_sources(settings)
 
     last_error: Exception | None = None
     for source_url in sources:
@@ -140,10 +158,10 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 if page_number == 0 and not page_items:
                     await save_debug(
                         debug_dir,
-                        "index-page-0-no-results",
+                        f"index-page-0-no-results-{debug_name(source_url)}",
                         html,
                         page,
-                        "No decision rows were found in the first index page.",
+                        "No decision rows were found in the first index page. Trying next source candidate if available.",
                     )
                     raise ScraperError("no decision rows found on the first UPC index page")
 
@@ -356,7 +374,7 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
     settings.ensure_dirs()
     db = Database(settings.db_path)
     db.init()
-    render_outputs(db, settings.public_dir)
+    render_outputs(db, settings)
 
     this_run_id = run_id()
     debug_run_dir = settings.debug_dir / this_run_id
@@ -397,7 +415,7 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                     for item in items:
                         db.mark_seen(item, now, bootstrapped=True)
                     db.finish_run(run_db_id, utc_now(), "success", discovered_count, 0)
-                    render_outputs(db, settings.public_dir)
+                    render_outputs(db, settings)
                     return {"status": "success", "discovered_count": discovered_count, "new_count": 0}
 
                 for item in items:
@@ -407,12 +425,12 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
                         if db.needs_enrichment(item.item_key):
                             logger.info("retrying enrichment for seen incomplete item %s", item.item_key)
                             await ingest_item(context, db, settings, item, debug_run_dir)
-                            render_outputs(db, settings.public_dir)
+                            render_outputs(db, settings)
                         continue
                     try:
                         await ingest_item(context, db, settings, item, debug_run_dir)
                         new_count += 1
-                        render_outputs(db, settings.public_dir)
+                        render_outputs(db, settings)
                     except Exception as exc:
                         logger.exception("failed to persist %s", item.item_key)
                         item_errors.append(f"{item.item_key}: {exc}")
@@ -434,12 +452,12 @@ async def run_ingestion(settings: Settings, bootstrap: bool = False) -> dict[str
             new_count,
             "\n".join(item_errors),
         )
-        render_outputs(db, settings.public_dir)
+        render_outputs(db, settings)
         return {"status": status, "discovered_count": discovered_count, "new_count": new_count}
     except Exception as exc:
         logger.exception("ingestion run failed")
         db.finish_run(run_db_id, utc_now(), "failed", discovered_count, new_count, str(exc))
-        render_outputs(db, settings.public_dir)
+        render_outputs(db, settings)
         raise
 
 
