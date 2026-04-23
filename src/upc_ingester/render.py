@@ -38,6 +38,26 @@ def latest_payload(decisions: list[dict[str, Any]], generated_at: str) -> dict[s
     }
 
 
+def status_payload(db: Database, generated_at: str, decision_count: int) -> dict[str, Any]:
+    latest_run = db.get_latest_run()
+    counts = db.get_status_counts()
+    last_success = None
+    if latest_run and latest_run.get("status") in {"success", "partial_success"}:
+        last_success = latest_run.get("finished_at")
+
+    return {
+        "generated_at": generated_at,
+        "database_path": str(db.path),
+        "decision_count_in_latest_json": decision_count,
+        "counts": counts,
+        "latest_run": latest_run,
+        "last_attempt_at": latest_run.get("started_at") if latest_run else None,
+        "last_success_at": last_success,
+        "last_status": latest_run.get("status") if latest_run else "never_run",
+        "last_error": latest_run.get("failure_summary") if latest_run else "",
+    }
+
+
 def render_outputs(db: Database, public_dir: Path) -> None:
     decisions = db.get_decisions()
     generated_at = utc_now()
@@ -49,6 +69,14 @@ def render_outputs(db: Database, public_dir: Path) -> None:
         sort_keys=True,
     )
     atomic_write_text(public_dir / "latest.json", json_content + "\n")
+
+    status_content = json.dumps(
+        status_payload(db, generated_at, len(decisions)),
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+    )
+    atomic_write_text(public_dir / "status.json", status_content + "\n")
 
     template_dir = Path(__file__).parent / "templates"
     env = Environment(
