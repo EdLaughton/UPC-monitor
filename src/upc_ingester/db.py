@@ -219,12 +219,6 @@ class Database:
             return row is not None
 
     def needs_enrichment(self, item_key: str) -> bool:
-        """Return True for seen items that still lack a mirrored PDF/document row or had errors.
-
-        A detail page can be temporarily unavailable or challenged. In that case
-        the scraper persists index metadata and marks the item seen so it is not
-        re-alerted, but later runs should still retry detail/PDF enrichment.
-        """
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -338,14 +332,18 @@ class Database:
                     ),
                 )
 
-    def get_decisions(self) -> list[dict[str, Any]]:
+    def get_decisions(self, limit: int | None = None) -> list[dict[str, Any]]:
+        query = """
+            SELECT * FROM decisions
+            ORDER BY COALESCE(decision_date, '') DESC, COALESCE(first_seen_at, '') DESC, id DESC
+        """
+        params: tuple[Any, ...] = ()
+        if limit and limit > 0:
+            query += " LIMIT ?"
+            params = (limit,)
+
         with self.connect() as conn:
-            rows = conn.execute(
-                """
-                SELECT * FROM decisions
-                ORDER BY COALESCE(decision_date, '') DESC, COALESCE(first_seen_at, '') DESC, id DESC
-                """
-            ).fetchall()
+            rows = conn.execute(query, params).fetchall()
             decisions: list[dict[str, Any]] = []
             for row in rows:
                 item = dict(row)
@@ -411,3 +409,68 @@ class Database:
                     "decision_date_count": 0,
                 }
             return {key: int(row[key] or 0) for key in row.keys()}
+
+    def get_stats(self) -> dict[str, Any]:
+        with self.connect() as conn:
+            def grouped(column: str, limit: int = 50) -> list[dict[str, Any]]:
+                rows = conn.execute(
+                    f"""
+                    SELECT COALESCE(NULLIF({column}, ''), '(blank)') AS value, COUNT(*) AS count
+                    FROM decisions
+                    GROUP BY value
+                    ORDER BY count DESC, value ASC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
+                return [dict(row) for row in rows]
+
+            by_year = conn.execute(
+                """
+                SELECT COALESCE(NULLIF(substr(decision_date, 1, 4), ''), '(blank)') AS value, COUNT(*) AS count
+                FROM decisions
+                GROUP BY value
+                ORDER BY value DESC
+                """
+            ).fetchall()
+            by_month = conn.execute(
+                """
+                SELECT COALESCE(NULLIF(substr(decision_date, 1, 7), ''), '(blank)') AS value, COUNT(*) AS count
+                FROM decisions
+                GROUP BY value
+                ORDER BY value DESC
+                LIMIT 120
+                """
+            ).fetchall()
+            top_parties = conn.execute(
+                """
+                SELECT value, COUNT(*) AS count
+                FROM decisions, json_each(decisions.party_names_all)
+                WHERE value IS NOT NULL AND value != ''
+                GROUP BY value
+                ORDER BY count DESC, value ASC
+                LIMIT 100
+                """
+            ).fetchall()
+            top_keywords = conn.execute(
+                """
+                SELECT value, COUNT(*) AS count
+                FROM decisions, json_each(decisions.keywords_list)
+                WHERE value IS NOT NULL AND value != ''
+                GROUP BY value
+                ORDER BY count DESC, value ASC
+                LIMIT 100
+                """
+            ).fetchall()
+
+            return {
+                "counts": self.get_status_counts(),
+                "by_year": [dict(row) for row in by_year],
+                "by_month": [dict(row) for row in by_month],
+                "by_division": grouped("division"),
+                "by_document_type": grouped("document_type"),
+                "by_type_of_action": grouped("type_of_action"),
+                "by_language": grouped("language"),
+                "top_parties": [dict(row) for row in top_parties],
+                "top_keywords": [dict(row) for row in top_keywords],
+            }
