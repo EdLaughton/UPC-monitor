@@ -102,6 +102,34 @@ async def settle_page(page, settings: Settings) -> None:
     await page.wait_for_timeout(500)
 
 
+async def click_next_pager(page, settings: Settings) -> bool:
+    """Advance by clicking the rendered Drupal pager's next link.
+
+    The UPC page emits ordinary pager hrefs, but in practice directly loading
+    the extracted page=1 URL can sometimes produce an empty result set. Clicking
+    the rendered link keeps the same browser/page state and gives Drupal's
+    behaviours a chance to handle the pager in the same way as a normal browser.
+    """
+    selectors = (
+        "li.pager__item--next a[href]",
+        "a[rel='next'][href]",
+        "a[title='Go to next page'][href]",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if not await locator.count():
+                continue
+            href = await locator.get_attribute("href")
+            logger.info("clicking UPC next pager link %s", href or "")
+            await locator.click(timeout=settings.navigation_timeout_ms)
+            await settle_page(page, settings)
+            return True
+        except Exception as exc:
+            logger.debug("could not click pager link %s: %s", selector, exc)
+    return False
+
+
 def dedupe_items(items: list[IndexItem]) -> list[IndexItem]:
     seen: set[str] = set()
     deduped: list[IndexItem] = []
@@ -180,7 +208,13 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     )
                     break
 
-                logger.info("index page %s yielded %s items", page_number, len(page_items))
+                cumulative = len(items) + len(page_items)
+                logger.info(
+                    "index page %s yielded %s items (cumulative discovered before dedupe: %s)",
+                    page_number,
+                    len(page_items),
+                    cumulative,
+                )
                 items.extend(page_items)
                 if settings.max_items and len(items) >= settings.max_items:
                     break
@@ -191,7 +225,22 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
 
                 next_url = extract_next_page_url(html, page.url)
                 if not next_url:
+                    logger.info("no next pager link found after index page %s", page_number)
                     break
+
+                previous_url = page.url
+                clicked = await click_next_pager(page, settings)
+                if clicked:
+                    page_number += 1
+                    url = page.url
+                    if url == previous_url:
+                        # Some Drupal behaviours keep the browser URL stable; in
+                        # that case reuse the extracted href as a deterministic
+                        # loop key while still parsing the clicked page next.
+                        url = next_url
+                    continue
+
+                logger.info("falling back to extracted next pager URL: %s", next_url)
                 url = next_url
                 page_number += 1
 
