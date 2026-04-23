@@ -101,8 +101,8 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
     last_error: Exception | None = None
     for source_url in sources:
         page = await context.new_page()
+        items: list[IndexItem] = []
         try:
-            items: list[IndexItem] = []
             seen_urls: set[str] = set()
             page_number = 0
             url = source_url
@@ -120,6 +120,13 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
 
                 if is_failure_page(html):
                     await save_debug(debug_dir, f"index-page-{page_number}-failure", html, page)
+                    if items:
+                        logger.warning(
+                            "UPC index page %s failed after %s item(s) had already been discovered; using partial results",
+                            page_number,
+                            len(items),
+                        )
+                        break
                     raise ScraperError(f"UPC index page {page_number} appears to be unavailable or challenged")
 
                 page_items = parse_index_page(html, page.url)
@@ -132,6 +139,21 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                         "No decision rows were found in the first index page.",
                     )
                     raise ScraperError("no decision rows found on the first UPC index page")
+
+                if page_number > 0 and not page_items:
+                    await save_debug(
+                        debug_dir,
+                        f"index-page-{page_number}-empty",
+                        html,
+                        page,
+                        "A later pagination page yielded no rows; keeping already discovered rows.",
+                    )
+                    logger.warning(
+                        "index page %s yielded 0 items after %s item(s) had already been discovered; stopping pagination",
+                        page_number,
+                        len(items),
+                    )
+                    break
 
                 logger.info("index page %s yielded %s items", page_number, len(page_items))
                 items.extend(page_items)
@@ -149,6 +171,14 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
             return dedupe_items(items)
         except Exception as exc:
             last_error = exc
+            if items:
+                logger.warning(
+                    "discovery failed for %s after %s item(s); using partial results: %s",
+                    source_url,
+                    len(items),
+                    exc,
+                )
+                return dedupe_items(items)
             logger.warning("discovery failed for %s: %s", source_url, exc)
         finally:
             await page.close()
