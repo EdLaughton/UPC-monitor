@@ -22,6 +22,40 @@ def test_parse_index_rows_by_headers() -> None:
     assert extract_last_page(html) == 4
 
 
+def test_parse_index_rows_with_sort_text_in_headers() -> None:
+    html = """
+    <table>
+      <thead>
+        <tr>
+          <th>Date <span>Sort ascending</span></th>
+          <th>Registry number/Order reference/Case number</th>
+          <th>Court</th>
+          <th>Type of action</th>
+          <th>Parties</th>
+          <th>UPC Document</th>
+        </tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td>23 April 2026</td>
+          <td>UPC_CFI_106/2025<br><a href="/en/node/183098">Full Details</a></td>
+          <td>Dusseldorf (DE) Local Division</td>
+          <td>Counterclaim for revocation</td>
+          <td>QUANTIFICARE S.A..<br>v.<br>Canfield Scientific GmbH a. o.</td>
+          <td><a href="/sites/default/files/files/api_order/example.pdf">PDF</a></td>
+        </tr>
+      </tbody>
+    </table>
+    """
+    item = parse_index_page(html, "https://www.unifiedpatentcourt.org/en/decisions-and-orders")[0]
+
+    assert item.decision_date == "2026-04-23"
+    assert item.case_number == "UPC_CFI_106/2025"
+    assert item.division == "Dusseldorf (DE) Local Division"
+    assert item.type_of_action == "Counterclaim for revocation"
+    assert item.parties_raw.startswith("QUANTIFICARE")
+
+
 def test_parse_detail_page_full_metadata_and_multiple_pdfs() -> None:
     html = (FIXTURES / "detail.html").read_text(encoding="utf-8")
     detail = parse_detail_page(html, "https://www.unifiedpatentcourt.org/en/node/123456")

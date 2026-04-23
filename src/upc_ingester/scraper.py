@@ -41,30 +41,11 @@ def run_id() -> str:
 
 def build_index_url(base_url: str, page_number: int) -> str:
     parsed = urlparse(base_url)
+    if page_number == 0 and not parsed.query:
+        return base_url
+
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    query.update(
-        {
-            "action_type_target_id": "All",
-            "court_type": "All",
-            "division_1": "125",
-            "division_2": "126",
-            "division_3": "139",
-            "division_4": "223",
-            "headnotes": "",
-            "judgement_date_from[date]": "",
-            "judgement_date_to[date]": "",
-            "judgement_type": "All",
-            "judgemet_reference": "",
-            "keywords": "",
-            "location_id": "All",
-            "order": "field_judgement_date",
-            "page": str(page_number),
-            "party_name": "",
-            "proceedings_lang": "All",
-            "registry_number": "",
-            "sort": "desc",
-        }
-    )
+    query["page"] = str(page_number)
     return urlunparse(parsed._replace(query=urlencode(query)))
 
 

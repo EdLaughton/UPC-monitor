@@ -148,6 +148,18 @@ def _cell_text(cell: Tag | None) -> str:
     return clean_multiline(cell.get_text("\n", strip=True))
 
 
+def _value_for(values: dict[str, str], *needles: str) -> str:
+    normalised = {normalise_heading(key): value for key, value in values.items()}
+    for needle in needles:
+        wanted = normalise_heading(needle)
+        if wanted in normalised:
+            return normalised[wanted]
+    for key, value in normalised.items():
+        if all(part in key for part in needles):
+            return value
+    return ""
+
+
 def _extract_refs(text: str) -> tuple[str, str, str]:
     refs = re.findall(r"\b[A-Z][A-Za-z]*_[0-9]+/[0-9]{4}\b|\bUPC_(?:CFI|CoA)_[0-9]+/[0-9]{4}\b", text)
     case_number = next((ref for ref in refs if ref.startswith("UPC_")), "")
@@ -195,22 +207,20 @@ def parse_index_page(html: str, base_url: str) -> list[IndexItem]:
             link = row.find("a", string=re.compile(r"Full Details", re.I))
         node_url = urljoin(base_url, link["href"]) if link and link.get("href") else ""
 
-        registry_cell = values.get("Registry number/Order reference", "")
-        if not registry_cell:
-            registry_cell = next((value for key, value in values.items() if "registry" in key.lower()), "")
+        registry_cell = _value_for(values, "registry")
         registry, order_ref, case_number = _extract_refs(registry_cell)
 
         item = IndexItem(
             item_key=_make_item_key(node_url, order_ref, registry, row_text),
             node_url=node_url,
-            decision_date=parse_date(values.get("Date", "")),
+            decision_date=parse_date(_value_for(values, "date")),
             registry_number=registry,
             order_or_decision_number=order_ref,
             case_number=case_number,
-            division=values.get("Court", ""),
-            type_of_action=values.get("Type of action", ""),
-            parties_raw=values.get("Parties", ""),
-            title_raw=values.get("Type", "") or values.get("UPC Document", ""),
+            division=_value_for(values, "court"),
+            type_of_action=_value_for(values, "type", "action"),
+            parties_raw=_value_for(values, "parties"),
+            title_raw=_value_for(values, "upc", "document") or _value_for(values, "type"),
             source_index_snapshot=values,
         )
         if item.node_url or item.order_or_decision_number or item.registry_number:

@@ -24,7 +24,10 @@ class CronScheduler:
             logger.warning("previous ingestion run is still active; skipping scheduled run")
             return
         async with self._lock:
-            await run_ingestion(self.settings, bootstrap=False)
+            try:
+                await run_ingestion(self.settings, bootstrap=False)
+            except Exception:
+                logger.exception("scheduled ingestion run failed; service will keep running")
 
     async def serve_forever(self) -> None:
         tz = ZoneInfo(self.settings.timezone)
