@@ -77,6 +77,7 @@ class Settings:
     navigation_timeout_ms: int
     page_wait_timeout_ms: int
     max_pages: int
+    max_items: int
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -97,7 +98,8 @@ class Settings:
             log_level=os.getenv("LOG_LEVEL", "INFO"),
             navigation_timeout_ms=env_int("NAVIGATION_TIMEOUT_MS", 60000),
             page_wait_timeout_ms=env_int("PAGE_WAIT_TIMEOUT_MS", 20000),
-            max_pages=env_int("MAX_PAGES", 0),
+            max_pages=env_int("MAX_PAGES", 1),
+            max_items=env_int("MAX_ITEMS", 10),
         )
 
     def ensure_dirs(self) -> None:
