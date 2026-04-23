@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Container version="2">
+  <Name>upc-monitor</Name>
+  <Repository>ghcr.io/YOUR_GITHUB_USERNAME/upc-monitor:latest</Repository>
+  <Registry>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor/pkgs/container/upc-monitor</Registry>
+  <Network>bridge</Network>
+  <Shell>sh</Shell>
+  <Privileged>false</Privileged>
+  <Support>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor</Support>
+  <Project>https://github.com/YOUR_GITHUB_USERNAME/UPC-monitor</Project>
+  <Overview>Polls official UPC Decisions and Orders, mirrors official PDFs, and serves a simple static index plus latest.json.</Overview>
+  <Category>Productivity: Tools:</Category>
+  <WebUI>http://[IP]:[PORT:8000]/</WebUI>
+  <Icon>https://www.unifiedpatentcourt.org/.well-known/favicon-32x32.png</Icon>
+  <Config Name="Web UI Port" Target="8000" Default="8000" Mode="tcp" Description="Host port for the UPC mirror web UI." Type="Port" Display="always" Required="true" Mask="false">8000</Config>
+  <Config Name="Data" Target="/data" Default="/mnt/user/appdata/upc-monitor" Mode="rw" Description="Persistent SQLite database, mirrored PDFs, generated HTML/JSON, and debug artifacts." Type="Path" Display="always" Required="true" Mask="false">/mnt/user/appdata/upc-monitor</Config>
+  <Config Name="POLL_CRON" Target="POLL_CRON" Default="0 * * * *" Mode="" Description="Cron schedule for polling UPC." Type="Variable" Display="always" Required="true" Mask="false">0 * * * *</Config>
+  <Config Name="TIMEZONE" Target="TIMEZONE" Default="Europe/London" Mode="" Description="Timezone used by the internal scheduler." Type="Variable" Display="always" Required="true" Mask="false">Europe/London</Config>
+  <Config Name="RUN_ON_START" Target="RUN_ON_START" Default="true" Mode="" Description="Run an ingestion pass when the container starts." Type="Variable" Display="always" Required="true" Mask="false">true</Config>
+  <Config Name="LOG_LEVEL" Target="LOG_LEVEL" Default="INFO" Mode="" Description="Python logging level." Type="Variable" Display="advanced" Required="false" Mask="false">INFO</Config>
+</Container>

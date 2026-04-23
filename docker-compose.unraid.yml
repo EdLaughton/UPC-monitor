@@ -1,0 +1,16 @@
+services:
+  upc-monitor:
+    image: ${UPC_MONITOR_IMAGE:-ghcr.io/YOUR_GITHUB_USERNAME/upc-monitor:latest}
+    container_name: upc-monitor
+    environment:
+      POLL_CRON: "${POLL_CRON:-0 * * * *}"
+      TIMEZONE: "${TIMEZONE:-Europe/London}"
+      RUN_ON_START: "${RUN_ON_START:-true}"
+      PORT: "8000"
+      DATA_DIR: "/data"
+      LOG_LEVEL: "${LOG_LEVEL:-INFO}"
+    ports:
+      - "${UPC_MONITOR_PORT:-8000}:8000"
+    volumes:
+      - /mnt/user/appdata/upc-monitor:/data
+    restart: unless-stopped

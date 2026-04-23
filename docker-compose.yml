@@ -1,0 +1,18 @@
+services:
+  upc-ingester:
+    build: .
+    environment:
+      POLL_CRON: "0 * * * *"
+      TIMEZONE: "Europe/London"
+      RUN_ON_START: "true"
+      PORT: "8000"
+      DATA_DIR: "/data"
+      LOG_LEVEL: "INFO"
+    ports:
+      - "8000:8000"
+    volumes:
+      - upc-data:/data
+    restart: unless-stopped
+
+volumes:
+  upc-data:
