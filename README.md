@@ -202,3 +202,122 @@ pytest
 ```
 
 The unit tests use local HTML fixtures and do not require a live browser.
+
+
+## Private Alerts + Airtable Review Queue
+
+This project now supports private watch-profile matching and optional Airtable sync for **matched alerts only**.
+
+Important design rules:
+
+- SQLite and local files under `/data` remain the full UPC mirror and source of truth.
+- Airtable is a private review queue for matched items only (not a full mirror).
+- Low-confidence matches are not synced by default.
+- No PDFs are uploaded to Airtable; only URLs/metadata are synced.
+- No Airtable AI/Automations are required.
+- Private alerts/watch profiles must stay private and are never written to `/data/public`.
+
+Airtable Free warning:
+
+- Airtable Free limits a base to roughly 1,000 records.
+- UPC catalog is larger than this, so sync intentionally only writes matched items.
+- A run-time safety cap defaults to `--airtable-max-sync-records 100` and counts estimated UPC Item + Match records before writing.
+
+### Airtable setup
+
+Base ID default:
+
+- `AIRTABLE_BASE_ID=appzaT3sgr7AfBKkn`
+
+Auth:
+
+- `AIRTABLE_TOKEN` (preferred) or `AIRTABLE_API_KEY`
+
+Watch profiles source:
+
+- Primary: Airtable `Watch Profiles` table (active profiles only)
+- Fallback: `/data/private/watch_profiles.yml`
+
+### Alerts commands
+
+```bash
+python -m upc_ingester alerts --dry-run
+python -m upc_ingester alerts --write-json
+python -m upc_ingester alerts --sync-airtable
+python -m upc_ingester alerts --since-days 7
+python -m upc_ingester alerts --include-low-confidence
+python -m upc_ingester alerts --airtable-max-sync-records 100
+```
+
+First run sequence:
+
+```bash
+python -m upc_ingester alerts --dry-run --since-days 30
+python -m upc_ingester alerts --write-json --since-days 30
+python -m upc_ingester alerts --write-json --sync-airtable --since-days 7 --airtable-max-sync-records 100
+```
+
+Inside a running container:
+
+```bash
+docker exec -it upc-monitor python -m upc_ingester alerts --dry-run --since-days 30
+docker exec -it upc-monitor python -m upc_ingester alerts --write-json --since-days 30
+docker exec -it upc-monitor python -m upc_ingester alerts --write-json --sync-airtable --since-days 7 --airtable-max-sync-records 100
+```
+
+### Private outputs
+
+Alerts write only under `/data/private`:
+
+- `/data/private/alerts.json`
+- `/data/private/alerts-digest-source.json`
+
+### Optional daily scheduled alerts (same container)
+
+Existing hourly UPC monitor remains unchanged.
+
+Default alert scheduler config (disabled by default):
+
+- `ALERTS_ENABLED=false`
+- `ALERTS_SYNC_AIRTABLE=false`
+- `ALERTS_SCHEDULE_HOUR=10`
+- `ALERTS_SCHEDULE_MINUTE=5`
+- `ALERTS_SINCE_DAYS=7`
+- `ALERTS_INCLUDE_LOW_CONFIDENCE=false`
+- `ALERTS_AIRTABLE_MAX_SYNC_RECORDS=100`
+
+When enabled:
+
+- Alerts job writes private JSON each run.
+- Airtable sync is optional (`ALERTS_SYNC_AIRTABLE=true`).
+- Alerts failures are logged and do not stop hourly ingestion.
+- Overlapping alerts runs are skipped safely.
+
+### Unraid / Docker operational examples
+
+Manual one-off sync:
+
+```bash
+docker run --rm \
+  --name upc-monitor-airtable-alerts \
+  -v /mnt/user/appdata/upc-monitor:/data \
+  --env-file /mnt/user/appdata/upc-monitor/private/airtable.env \
+  ghcr.io/edlaughton/upc-monitor:latest \
+  python -m upc_ingester alerts --write-json --sync-airtable --since-days 7 --airtable-max-sync-records 100
+```
+
+Long-running monitor with scheduled alerts:
+
+```bash
+docker run -d \
+  --name upc-monitor \
+  -v /mnt/user/appdata/upc-monitor:/data \
+  --env-file /mnt/user/appdata/upc-monitor/private/airtable.env \
+  -e ALERTS_ENABLED=true \
+  -e ALERTS_SYNC_AIRTABLE=true \
+  -e ALERTS_SCHEDULE_HOUR=10 \
+  -e ALERTS_SCHEDULE_MINUTE=5 \
+  -e ALERTS_SINCE_DAYS=7 \
+  -e ALERTS_AIRTABLE_MAX_SYNC_RECORDS=100 \
+  ghcr.io/edlaughton/upc-monitor:latest
+```

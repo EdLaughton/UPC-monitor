@@ -8,6 +8,14 @@ services:
       PORT: "8000"
       DATA_DIR: "/data"
       LOG_LEVEL: "INFO"
+      ALERTS_ENABLED: "false"
+      ALERTS_SYNC_AIRTABLE: "false"
+      ALERTS_SCHEDULE_HOUR: "10"
+      ALERTS_SCHEDULE_MINUTE: "5"
+      ALERTS_SINCE_DAYS: "7"
+      ALERTS_INCLUDE_LOW_CONFIDENCE: "false"
+      ALERTS_AIRTABLE_MAX_SYNC_RECORDS: "100"
+      AIRTABLE_BASE_ID: "appzaT3sgr7AfBKkn"
     ports:
       - "8000:8000"
     volumes:

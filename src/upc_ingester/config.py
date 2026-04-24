@@ -85,6 +85,14 @@ class Settings:
     index_page_max_retries: int
     latest_export_limit: int
     write_all_json: bool
+    alerts_enabled: bool = False
+    alerts_sync_airtable: bool = False
+    alerts_schedule_hour: int = 10
+    alerts_schedule_minute: int = 5
+    alerts_since_days: int = 7
+    alerts_include_low_confidence: bool = False
+    alerts_airtable_max_sync_records: int = 100
+    airtable_base_id: str = "appzaT3sgr7AfBKkn"
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -114,6 +122,14 @@ class Settings:
             index_page_max_retries=env_int("INDEX_PAGE_MAX_RETRIES", 3),
             latest_export_limit=env_int("LATEST_EXPORT_LIMIT", 50),
             write_all_json=env_bool("WRITE_ALL_JSON", False),
+            alerts_enabled=env_bool("ALERTS_ENABLED", False),
+            alerts_sync_airtable=env_bool("ALERTS_SYNC_AIRTABLE", False),
+            alerts_schedule_hour=env_int("ALERTS_SCHEDULE_HOUR", 10),
+            alerts_schedule_minute=env_int("ALERTS_SCHEDULE_MINUTE", 5),
+            alerts_since_days=env_int("ALERTS_SINCE_DAYS", 7),
+            alerts_include_low_confidence=env_bool("ALERTS_INCLUDE_LOW_CONFIDENCE", False),
+            alerts_airtable_max_sync_records=env_int("ALERTS_AIRTABLE_MAX_SYNC_RECORDS", 100),
+            airtable_base_id=os.getenv("AIRTABLE_BASE_ID", "appzaT3sgr7AfBKkn"),
         )
 
     def ensure_dirs(self) -> None:
