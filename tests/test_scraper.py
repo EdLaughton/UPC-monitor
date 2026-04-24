@@ -125,8 +125,11 @@ class FakeLocator:
             return
         if self.page.next_page is None:
             return
+        self.page.history.append((self.page.current_page, self.page.url, self.page.current_window))
         self.page.current_page = self.page.next_page
         self.page.url = build_index_url(self.page.base_url, self.page.current_page)
+        self.page.current_window = None
+        self.page.last_html = ""
 
 
 class FakePage:
@@ -139,11 +142,13 @@ class FakePage:
         self.apply_clicks = 0
         self.visited_urls: list[str] = []
         self.last_html = ""
+        self.history: list[tuple[int, str, tuple[str, str] | None]] = []
+        self.fail_go_back = False
 
     @property
     def next_page(self) -> int | None:
         value = self.pages.get(self.current_window, "") if self.current_window is not None else self.pages.get(self.current_page, "")
-        html = page_html_value(value)
+        html = page_html_peek(value)
         match = re.search(r'href="\?page=(\d+)"', html)
         return int(match.group(1)) if match else None
 
@@ -156,6 +161,12 @@ class FakePage:
         start = from_query.get("judgement_date_from[date]", "")
         end = from_query.get("judgement_date_to[date]", "")
         self.current_window = (start, end) if start or end else None
+
+    async def go_back(self, wait_until: str = "", timeout: int = 0) -> None:
+        if self.fail_go_back or not self.history:
+            raise RuntimeError("cannot go back")
+        self.current_page, self.url, self.current_window = self.history.pop()
+        self.last_html = ""
 
     async def content(self) -> str:
         if self.current_window is not None:
@@ -181,12 +192,14 @@ class FakePage:
 
 
 class FakeContext:
-    def __init__(self, pages: dict):
+    def __init__(self, pages: dict, *, fail_go_back: bool = False):
         self.pages = pages
         self.last_page: FakePage | None = None
+        self.fail_go_back = fail_go_back
 
     async def new_page(self) -> FakePage:
         self.last_page = FakePage(self.pages)
+        self.last_page.fail_go_back = self.fail_go_back
         return self.last_page
 
 
@@ -627,6 +640,71 @@ def test_discovery_prefers_clicking_next_pager_before_direct_page_url(tmp_path: 
     assert [item.item_key for item in items] == ["node-100", "node-101"]
     assert context.last_page is not None
     assert context.last_page.visited_urls == [build_index_url("https://example.test/index?filter=1", 0)]
+
+
+def test_clicked_navigation_failure_restores_last_good_page_and_clicks_again(tmp_path: Path) -> None:
+    pages = {page: index_html(page, f"node-{100 + page}", next_page=page + 1) for page in range(6)}
+    pages[6] = [failure_html(), index_html(6, "node-106", next_page=None)]
+    context = FakeContext(pages)
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=7,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(context, settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == [f"node-{100 + page}" for page in range(7)]
+    assert getattr(items, "partial") is False
+    assert context.last_page is not None
+    assert build_index_url("https://example.test/index?filter=1", 6) not in context.last_page.visited_urls
+
+
+def test_paginated_reset_after_clicked_navigation_retries_from_last_good_without_apply(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: [unsubmitted_form_html(), index_html(1, "node-101", next_page=None)],
+    }
+    context = FakeContext(pages)
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=2,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(context, settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-100", "node-101"]
+    assert context.last_page is not None
+    assert context.last_page.apply_clicks == 0
+    assert build_index_url("https://example.test/index?filter=1", 1) not in context.last_page.visited_urls
+
+
+def test_restore_last_good_page_failure_returns_partial_results(tmp_path: Path) -> None:
+    pages = {
+        0: [index_html(0, "node-100", next_page=1), failure_html()],
+        1: [failure_html(), index_html(1, "node-101", next_page=None)],
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=2,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages, fail_go_back=True), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-100"]
+    assert getattr(items, "partial") is True
+    assert "could not restore last good UPC index page 0" in getattr(items, "stopped_reason")
 
 
 def test_index_page_retry_exhaustion_returns_partial_results(tmp_path: Path) -> None:

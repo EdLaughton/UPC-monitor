@@ -101,6 +101,11 @@ def select_next_index_url(source_url: str, requested_page_number: int, actual_ur
         return direct_next
     return absolute_next
 
+
+def item_signature(items: list[IndexItem]) -> tuple[str, ...]:
+    return tuple(item.item_key for item in items)
+
+
 def parse_result_total(html: str) -> int | None:
     match = re.search(r"Displaying\s+\d+\s*-\s*\d+\s+of\s+(\d+)", html, flags=re.I)
     if not match:
@@ -440,6 +445,109 @@ async def load_and_parse_index_page(
     raise AssertionError("unreachable index parse retry loop")
 
 
+async def parse_current_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    page_number: int,
+) -> tuple[str, list[IndexItem], bool]:
+    html = await page.content()
+    return await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
+
+
+async def restore_good_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    page_number: int,
+    url: str,
+    expected_signature: tuple[str, ...],
+) -> tuple[str, list[IndexItem]]:
+    restore_errors: list[str] = []
+
+    go_back = getattr(page, "go_back", None)
+    if go_back is not None:
+        try:
+            logger.info("restoring UPC index page %s using browser history", page_number)
+            await go_back(wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+            await settle_page(page, settings)
+            html, page_items, _ = await parse_current_index_page(page, settings, debug_dir, page_number)
+            if item_signature(page_items) == expected_signature:
+                return html, page_items
+            restore_errors.append("browser history restored a page with an unexpected item signature")
+        except Exception as exc:
+            restore_errors.append(f"browser history restore failed: {exc}")
+
+    try:
+        logger.warning("falling back to direct reload of last good UPC index page %s: %s", page_number, url)
+        html = await load_upc_html_page(
+            page,
+            settings,
+            debug_dir,
+            url,
+            f"index-page-{page_number}-restore",
+            f"last good index page {page_number}",
+        )
+        html, page_items, _ = await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
+        if item_signature(page_items) == expected_signature:
+            return html, page_items
+        restore_errors.append("direct reload restored a page with an unexpected item signature")
+    except Exception as exc:
+        restore_errors.append(f"direct reload restore failed: {exc}")
+
+    message = f"could not restore last good UPC index page {page_number}: {'; '.join(restore_errors)}"
+    await save_debug(debug_dir, f"index-page-{page_number}-restore-failed", page=page, note=message)
+    raise ScraperError(message)
+
+
+async def click_and_parse_next_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    target_page_number: int,
+    last_good_page_number: int,
+    last_good_url: str,
+    last_good_signature: tuple[str, ...],
+) -> tuple[str, list[IndexItem], bool]:
+    max_retries = max(settings.index_page_max_retries, 0)
+    max_attempts = max_retries + 1
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        clicked = await click_next_pager(page, settings)
+        if not clicked:
+            last_error = ScraperError(f"UPC index page {target_page_number} next pager could not be clicked")
+        else:
+            try:
+                return await parse_current_index_page(page, settings, debug_dir, target_page_number)
+            except Exception as exc:
+                last_error = exc
+
+        if attempt >= max_attempts:
+            break
+
+        logger.warning(
+            "UPC index page %s clicked navigation failed on attempt %s/%s; restoring page %s and retrying after %s second(s): %s",
+            target_page_number,
+            attempt,
+            max_attempts,
+            last_good_page_number,
+            settings.index_page_retry_delay_seconds,
+            last_error,
+        )
+        await asyncio.sleep(settings.index_page_retry_delay_seconds)
+        await restore_good_index_page(
+            page,
+            settings,
+            debug_dir,
+            last_good_page_number,
+            last_good_url,
+            last_good_signature,
+        )
+
+    raise ScraperError(str(last_error or f"UPC index page {target_page_number} clicked navigation failed"))
+
+
 async def discover_date_window_items_for_source(page, settings: Settings, debug_dir: Path, source_url: str) -> list[IndexItem]:
     start, end = configured_date_range(settings)
     stack = list(reversed(date_windows(start, end, settings.date_window_days)))
@@ -562,28 +670,40 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
             page_number = 0
             pages_collected = 0
             url = build_index_url(source_url, 0)
-            use_current_page = False
+            last_good_page_number = -1
+            last_good_url = ""
+            last_good_signature: tuple[str, ...] = ()
             while url:
-                if not use_current_page and url in seen_urls:
+                if url in seen_urls:
                     logger.warning("stopping discovery because pager looped back to %s", url)
                     break
-                if not use_current_page:
-                    seen_urls.add(url)
+                seen_urls.add(url)
 
                 logger.info(
                     "discovering UPC index requested_page=%s url=%s",
                     page_number,
                     url,
                 )
-                html, page_items, submitted_form = await load_and_parse_index_page(
-                    page,
-                    settings,
-                    debug_dir,
-                    page_number,
-                    url,
-                    use_current_page=use_current_page,
-                )
-                use_current_page = False
+                if page_number == 0:
+                    html, page_items, submitted_form = await load_and_parse_index_page(
+                        page,
+                        settings,
+                        debug_dir,
+                        page_number,
+                        url,
+                    )
+                else:
+                    if not last_good_signature or not last_good_url:
+                        raise ScraperError(f"cannot advance to UPC index page {page_number}: no last good page to click from")
+                    html, page_items, submitted_form = await click_and_parse_next_index_page(
+                        page,
+                        settings,
+                        debug_dir,
+                        page_number,
+                        last_good_page_number,
+                        last_good_url,
+                        last_good_signature,
+                    )
                 actual_url = page.url
                 actual_page_number = parse_page_number(actual_url)
                 logger.info(
@@ -634,6 +754,10 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     )
                     break
 
+                last_good_page_number = page_number
+                last_good_url = actual_url
+                last_good_signature = item_signature(page_items)
+
                 cumulative = len(items) + len(page_items)
                 logger.info(
                     "index page %s yielded %s collected items (cumulative discovered before dedupe: %s)",
@@ -671,10 +795,8 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 )
 
                 logger.info("using selected next pager URL: %s", next_url)
-                clicked = await click_next_pager(page, settings)
                 url = next_url
                 page_number = next_page_number if next_page_number > page_number else page_number + 1
-                use_current_page = clicked
 
             return discovered_items(items, settings)
         except Exception as exc:
