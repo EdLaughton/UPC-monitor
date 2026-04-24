@@ -11,7 +11,11 @@ docker compose up --build
 The mirror is served at:
 
 - `http://localhost:8000/`
+- `http://localhost:8000/stats.html`
 - `http://localhost:8000/latest.json`
+- `http://localhost:8000/stats.json`
+- `http://localhost:8000/status.json`
+- `http://localhost:8000/all.ndjson`
 - mirrored PDFs under `http://localhost:8000/pdfs/...`
 
 ## Publish the Image
@@ -66,7 +70,10 @@ After the container starts, open:
 
 ```text
 http://<unraid-ip>:8000/
+http://<unraid-ip>:8000/stats.html
 http://<unraid-ip>:8000/latest.json
+http://<unraid-ip>:8000/stats.json
+http://<unraid-ip>:8000/status.json
 ```
 
 ## Commands
@@ -153,7 +160,12 @@ and deploy it. The compose file persists all app data under `/mnt/user/appdata/u
 ```text
 /data/upc.sqlite3
 /data/public/index.html
+/data/public/stats.html
 /data/public/latest.json
+/data/public/stats.json
+/data/public/status.json
+/data/public/all.ndjson
+/data/public/all.json        # only when WRITE_ALL_JSON=true or --write-all-json is used
 /data/public/pdfs/YYYY/node-NNNNN/<stable-name>.pdf
 /data/debug/<run-id>/
 ```
@@ -166,6 +178,8 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
 - Use `python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. If pagination is interrupted, resume with `--start-page`, for example `--start-page 22`.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
+- `/stats.html` and `/stats.json` are generated from already-ingested SQLite records only. The statistics are descriptive and separate UPC decision/order statistics from scraper/data-quality health.
+- `/status.json` is operational run status. `/all.ndjson` is a full machine-readable export, while `/latest.json` is capped by `LATEST_EXPORT_LIMIT`.
 - PDF bytes are validated as PDFs and hashed with SHA-256 before an item is marked seen.
 
 ## Tests

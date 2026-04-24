@@ -10,6 +10,7 @@ from jinja2 import Environment, FileSystemLoader, select_autoescape
 
 from .config import Settings
 from .db import Database
+from .stats import build_stats
 
 
 def utc_now() -> str:
@@ -106,12 +107,8 @@ def render_outputs(db: Database, settings_or_public_dir: Settings | Path) -> Non
     )
     atomic_write_text(public_dir / "latest.json", json_content + "\n")
 
-    stats_content = json.dumps(
-        {"generated_at": generated_at, **db.get_stats()},
-        ensure_ascii=False,
-        indent=2,
-        sort_keys=True,
-    )
+    stats = build_stats(all_decisions, generated_at=generated_at)
+    stats_content = json.dumps(stats, ensure_ascii=False, indent=2, sort_keys=True)
     atomic_write_text(public_dir / "stats.json", stats_content + "\n")
 
     status_content = json.dumps(
@@ -141,3 +138,7 @@ def render_outputs(db: Database, settings_or_public_dir: Settings | Path) -> Non
     template = env.get_template("index.html.j2")
     html = template.render(decisions=latest_decisions, generated_at=generated_at)
     atomic_write_text(public_dir / "index.html", html)
+
+    stats_template = env.get_template("stats.html.j2")
+    stats_html = stats_template.render(stats=stats, generated_at=generated_at)
+    atomic_write_text(public_dir / "stats.html", stats_html)
