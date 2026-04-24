@@ -17,8 +17,11 @@ from upc_ingester.scraper import (
     discover_items,
     fetch_detail,
     ingest_discovered_items,
+    load_and_parse_index_page,
     needs_enrichment,
     parse_page_number,
+    parse_or_submit_index_page,
+    ScraperError,
     select_next_index_url,
     upsert_index_only_item,
 )
@@ -63,11 +66,31 @@ def failure_html() -> str:
     return "<html><body>The API is currently unavailable</body></html>"
 
 
+def unsubmitted_form_html() -> str:
+    return """
+    <!doctype html>
+    <html>
+    <body>
+      <p>Please submit the form below to get your result</p>
+      <form data-drupal-selector="views-exposed-form-collection-of-judgements-page-1">
+        <input id="edit-submit-collection-of-judgements" type="submit" value="Apply">
+      </form>
+    </body>
+    </html>
+    """
+
+
 def page_html_value(value) -> str:
     if isinstance(value, list):
         if len(value) > 1:
             return value.pop(0)
         return value[0]
+    return value
+
+
+def page_html_peek(value) -> str:
+    if isinstance(value, list):
+        return value[0] if value else ""
     return value
 
 
@@ -78,10 +101,15 @@ class FakeLocator:
         self.first = self
 
     async def count(self) -> int:
+        html = self.page.last_html or page_html_peek(
+            self.page.pages.get(self.page.current_window, "")
+            if self.page.current_window is not None
+            else self.page.pages.get(self.page.current_page, "")
+        )
         if "pager" in self.selector or "rel='next'" in self.selector or "Go to next" in self.selector:
             return 1 if self.page.next_page is not None else 0
         if "edit-submit-collection-of-judgements" in self.selector or "views-exposed-form" in self.selector:
-            return 1 if "edit-submit-collection-of-judgements" in self.page.pages.get(self.page.current_page, "") else 0
+            return 1 if "edit-submit-collection-of-judgements" in html else 0
         return 0
 
     async def get_attribute(self, name: str) -> str:
@@ -91,6 +119,7 @@ class FakeLocator:
 
     async def click(self, timeout: int = 0) -> None:
         if "edit-submit-collection-of-judgements" in self.selector or "views-exposed-form" in self.selector:
+            self.page.apply_clicks += 1
             self.page.current_page = 0
             self.page.url = build_index_url(self.page.base_url, 0)
             return
@@ -107,6 +136,9 @@ class FakePage:
         self.current_page = 0
         self.current_window: tuple[str, str] | None = None
         self.url = build_index_url(base_url, 0)
+        self.apply_clicks = 0
+        self.visited_urls: list[str] = []
+        self.last_html = ""
 
     @property
     def next_page(self) -> int | None:
@@ -117,6 +149,8 @@ class FakePage:
 
     async def goto(self, url: str, wait_until: str = "", timeout: int = 0) -> None:
         self.url = url
+        self.visited_urls.append(url)
+        self.last_html = ""
         self.current_page = parse_page_number(url)
         from_query = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
         start = from_query.get("judgement_date_from[date]", "")
@@ -125,8 +159,10 @@ class FakePage:
 
     async def content(self) -> str:
         if self.current_window is not None:
-            return page_html_value(self.pages.get(self.current_window, ""))
-        return page_html_value(self.pages.get(self.current_page, ""))
+            self.last_html = page_html_value(self.pages.get(self.current_window, ""))
+            return self.last_html
+        self.last_html = page_html_value(self.pages.get(self.current_page, ""))
+        return self.last_html
 
     def locator(self, selector: str) -> FakeLocator:
         return FakeLocator(self, selector)
@@ -488,6 +524,62 @@ def test_settings_for_backfill_overrides_crawl_limits(tmp_path: Path) -> None:
     assert settings.date_to == "2026-04-24"
     assert settings.date_window_days == 7
 
+
+def test_first_index_page_unsubmitted_form_still_clicks_apply(tmp_path: Path) -> None:
+    pages = {
+        0: [unsubmitted_form_html(), index_html(0, "node-100")],
+    }
+    page = FakePage(pages)
+    settings = make_settings(tmp_path)
+    html = asyncio.run(page.content())
+
+    _, items, submitted = asyncio.run(parse_or_submit_index_page(page, settings, tmp_path / "debug", 0, html))
+
+    assert submitted is True
+    assert page.apply_clicks == 1
+    assert [item.item_key for item in items] == ["node-100"]
+
+
+def test_paginated_unsubmitted_form_does_not_click_apply_and_is_retryable(tmp_path: Path) -> None:
+    pages = {
+        1: unsubmitted_form_html(),
+    }
+    page = FakePage(pages)
+    settings = make_settings(tmp_path)
+    page.url = build_index_url(page.base_url, 1)
+    page.current_page = 1
+    html = asyncio.run(page.content())
+
+    try:
+        asyncio.run(parse_or_submit_index_page(page, settings, tmp_path / "debug", 1, html))
+    except ScraperError as exc:
+        assert "rendered unsubmitted form/reset state" in str(exc)
+    else:
+        raise AssertionError("paginated unsubmitted form should be retryable instead of submitted")
+
+    assert page.apply_clicks == 0
+
+
+def test_paginated_unsubmitted_form_retries_same_url_and_then_succeeds(tmp_path: Path) -> None:
+    pages = {
+        1: [unsubmitted_form_html(), index_html(1, "node-101")],
+    }
+    page = FakePage(pages)
+    settings = replace(
+        make_settings(tmp_path),
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+    url = build_index_url(page.base_url, 1)
+
+    _, items, submitted = asyncio.run(load_and_parse_index_page(page, settings, tmp_path / "debug", 1, url))
+
+    assert submitted is False
+    assert page.apply_clicks == 0
+    assert page.visited_urls == [url, url]
+    assert [item.item_key for item in items] == ["node-101"]
+
+
 def test_duplicate_item_keys_are_deduped_after_discovery(tmp_path: Path) -> None:
     page_zero = index_html(0, "node-100", next_page=1)
     pages = {
@@ -537,6 +629,29 @@ def test_index_page_retry_exhaustion_returns_partial_results(tmp_path: Path) -> 
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
     assert [item.item_key for item in items] == ["node-100"]
+    assert getattr(items, "partial") is True
+    assert "appears to be unavailable or challenged" in getattr(items, "stopped_reason")
+
+
+def test_paginated_unsubmitted_form_retry_exhaustion_returns_partial_results(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: [unsubmitted_form_html(), unsubmitted_form_html()],
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=2,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-100"]
+    assert getattr(items, "partial") is True
+    assert "rendered unsubmitted form/reset state" in getattr(items, "stopped_reason")
 
 
 def test_detail_page_failure_retries_same_url_before_parsing(tmp_path: Path) -> None:

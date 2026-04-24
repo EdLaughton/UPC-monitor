@@ -30,6 +30,13 @@ class ScraperError(RuntimeError):
     pass
 
 
+class DiscoveredItems(list[IndexItem]):
+    def __init__(self, items: list[IndexItem], *, partial: bool = False, stopped_reason: str = ""):
+        super().__init__(items)
+        self.partial = partial
+        self.stopped_reason = stopped_reason
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
@@ -239,6 +246,16 @@ def cap_items(items: list[IndexItem], settings: Settings) -> list[IndexItem]:
     return items
 
 
+def discovered_items(
+    items: list[IndexItem],
+    settings: Settings,
+    *,
+    partial: bool = False,
+    stopped_reason: str = "",
+) -> DiscoveredItems:
+    return DiscoveredItems(cap_items(dedupe_items(items), settings), partial=partial, stopped_reason=stopped_reason)
+
+
 def needs_enrichment(decision: dict[str, object] | None) -> bool:
     if decision is None:
         return True
@@ -321,6 +338,17 @@ async def parse_or_submit_index_page(
     if page_items or not is_unsubmitted_decisions_form(html):
         return html, page_items, False
 
+    if page_number > 0:
+        message = f"UPC index page {page_number} rendered unsubmitted form/reset state"
+        await save_debug(
+            debug_dir,
+            f"index-page-{page_number}-unsubmitted-form-reset",
+            html,
+            page,
+            message,
+        )
+        raise ScraperError(message)
+
     logger.info("UPC index page %s rendered the unsubmitted search form; clicking Apply", page_number)
     submitted = await submit_decisions_form(page, settings)
     if not submitted:
@@ -333,6 +361,57 @@ async def parse_or_submit_index_page(
     page_items = parse_index_page(html, page.url)
     logger.info("UPC index page %s yielded %s item(s) after form submit", page_number, len(page_items))
     return html, page_items, True
+
+
+def is_retryable_index_parse_error(exc: Exception) -> bool:
+    if not isinstance(exc, ScraperError):
+        return False
+    message = str(exc)
+    return (
+        "appears to be unavailable or challenged" in message
+        or "became unavailable or challenged" in message
+        or "rendered unsubmitted form/reset state" in message
+    )
+
+
+async def load_and_parse_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    page_number: int,
+    url: str,
+    debug_prefix: str | None = None,
+    description: str | None = None,
+) -> tuple[str, list[IndexItem], bool]:
+    max_retries = max(settings.index_page_max_retries, 0)
+    max_attempts = max_retries + 1
+    debug_prefix = debug_prefix or f"index-page-{page_number}"
+    description = description or f"index page {page_number}"
+    for attempt in range(1, max_attempts + 1):
+        html = await load_upc_html_page(
+            page,
+            settings,
+            debug_dir,
+            url,
+            debug_prefix,
+            description,
+        )
+        try:
+            return await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
+        except Exception as exc:
+            if attempt >= max_attempts or not is_retryable_index_parse_error(exc):
+                raise
+            logger.warning(
+                "UPC index page %s parse/submit failed transiently on attempt %s/%s; retrying same URL after %s second(s): %s",
+                page_number,
+                attempt,
+                max_attempts,
+                settings.index_page_retry_delay_seconds,
+                exc,
+            )
+            await asyncio.sleep(settings.index_page_retry_delay_seconds)
+
+    raise AssertionError("unreachable index parse retry loop")
 
 
 async def discover_date_window_items_for_source(page, settings: Settings, debug_dir: Path, source_url: str) -> list[IndexItem]:
@@ -358,15 +437,15 @@ async def discover_date_window_items_for_source(page, settings: Settings, debug_
 
         url = build_date_index_url(source_url, window_start, window_end)
         logger.info("discovering UPC date window %s..%s: %s", window_start, window_end, url)
-        html = await load_upc_html_page(
+        html, page_items, submitted_form = await load_and_parse_index_page(
             page,
             settings,
             debug_dir,
+            0,
             url,
             f"date-window-{window_start.isoformat()}-{window_end.isoformat()}",
             f"date window {window_start.isoformat()}..{window_end.isoformat()}",
         )
-        html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, 0, html)
         actual_url = page.url
         total = parse_result_total(html)
         has_next_page = bool(extract_next_page_url(html, actual_url))
@@ -425,7 +504,7 @@ async def discover_date_window_items_for_source(page, settings: Settings, debug_
             logger.info("stopping date-window discovery at MAX_PAGES=%s collected window(s)", settings.max_pages)
             break
 
-    return cap_items(dedupe_items(items), settings)
+    return discovered_items(items, settings)
 
 
 async def discover_date_window_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
@@ -468,15 +547,13 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     page_number,
                     url,
                 )
-                html = await load_upc_html_page(
+                html, page_items, submitted_form = await load_and_parse_index_page(
                     page,
                     settings,
                     debug_dir,
+                    page_number,
                     url,
-                    f"index-page-{page_number}",
-                    f"index page {page_number}",
                 )
-                html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
                 actual_url = page.url
                 actual_page_number = parse_page_number(actual_url)
                 logger.info(
@@ -567,7 +644,7 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 url = next_url
                 page_number = next_page_number if next_page_number > page_number else page_number + 1
 
-            return cap_items(dedupe_items(items), settings)
+            return discovered_items(items, settings)
         except Exception as exc:
             last_error = exc
             if items:
@@ -577,7 +654,7 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     len(items),
                     exc,
                 )
-                return cap_items(dedupe_items(items), settings)
+                return discovered_items(items, settings, partial=True, stopped_reason=str(exc))
             logger.warning("discovery failed for %s: %s", source_url, exc)
         finally:
             await page.close()
@@ -801,7 +878,7 @@ async def run_ingestion(
     settings: Settings,
     bootstrap: bool = False,
     index_only: bool = False,
-) -> dict[str, int | str]:
+) -> dict[str, int | str | bool]:
     settings.ensure_dirs()
     db = Database(settings.db_path)
     db.init()
@@ -840,15 +917,22 @@ async def run_ingestion(
             try:
                 items = await discover_items(context, settings, debug_run_dir)
                 discovered_count = len(items)
+                partial_discovery = bool(getattr(items, "partial", False))
+                stopped_reason = str(getattr(items, "stopped_reason", ""))
                 logger.info("discovered %s UPC index item(s)", discovered_count)
 
                 if bootstrap:
                     now = utc_now()
                     for item in items:
                         db.mark_seen(item, now, bootstrapped=True)
-                    db.finish_run(run_db_id, utc_now(), "success", discovered_count, 0)
+                    status = "partial_success" if partial_discovery else "success"
+                    db.finish_run(run_db_id, utc_now(), status, discovered_count, 0, stopped_reason)
                     render_outputs(db, settings)
-                    return {"status": "success", "discovered_count": discovered_count, "new_count": 0}
+                    result: dict[str, int | str | bool] = {"status": status, "discovered_count": discovered_count, "new_count": 0}
+                    if partial_discovery:
+                        result["partial"] = True
+                        result["stopped_reason"] = stopped_reason
+                    return result
 
                 new_count, skipped_complete_count, item_errors = await ingest_discovered_items(
                     context,
@@ -867,21 +951,28 @@ async def run_ingestion(
             logger.info("index-only inserted/updated %s item(s)", new_count)
         if skipped_complete_count:
             logger.info("skipped %s complete item(s)", skipped_complete_count)
-        status = "success" if not item_errors else "partial_success"
+        partial_discovery = bool(locals().get("partial_discovery", False))
+        stopped_reason = str(locals().get("stopped_reason", ""))
+        status = "success" if not item_errors and not partial_discovery else "partial_success"
+        failure_summary = "\n".join(part for part in [stopped_reason, *item_errors] if part)
         db.finish_run(
             run_db_id,
             utc_now(),
             status,
             discovered_count,
             new_count,
-            "\n".join(item_errors),
+            failure_summary,
         )
-        return {
+        result = {
             "status": status,
             "discovered_count": discovered_count,
             "new_count": new_count,
             "skipped_complete_count": skipped_complete_count,
         }
+        if partial_discovery:
+            result["partial"] = True
+            result["stopped_reason"] = stopped_reason
+        return result
     except Exception as exc:
         logger.exception("ingestion run failed")
         db.finish_run(run_db_id, utc_now(), "failed", discovered_count, new_count, str(exc))
@@ -889,5 +980,5 @@ async def run_ingestion(
         raise
 
 
-def run_ingestion_sync(settings: Settings, bootstrap: bool = False, index_only: bool = False) -> dict[str, int | str]:
+def run_ingestion_sync(settings: Settings, bootstrap: bool = False, index_only: bool = False) -> dict[str, int | str | bool]:
     return asyncio.run(run_ingestion(settings, bootstrap=bootstrap, index_only=index_only))
