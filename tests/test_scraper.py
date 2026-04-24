@@ -15,6 +15,7 @@ from upc_ingester.scraper import (
     cap_items,
     date_windows,
     discover_items,
+    fetch_detail,
     ingest_discovered_items,
     needs_enrichment,
     parse_page_number,
@@ -53,20 +54,6 @@ def index_html(page_number: int, item_key: str, next_page: int | None = None) ->
         </tbody>
       </table>
       {next_link}
-    </body>
-    </html>
-    """
-
-
-def unsubmitted_form_html() -> str:
-    return """
-    <!doctype html>
-    <html>
-    <body>
-      <p>Please submit the form below to get your result</p>
-      <form data-drupal-selector="views-exposed-form-collection-of-judgements-page-1">
-        <input id="edit-submit-collection-of-judgements" type="submit" value="Apply">
-      </form>
     </body>
     </html>
     """
@@ -215,7 +202,6 @@ def make_settings(tmp_path: Path) -> Settings:
         page_wait_timeout_ms=1000,
         max_pages=1,
         max_items=10,
-        start_page=0,
         date_from="",
         date_to="",
         date_window_days=0,
@@ -483,12 +469,11 @@ def test_backward_pager_selects_deterministic_next_page_url() -> None:
     assert parse_page_number(selected) == 22
 
 
-def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
+def test_settings_for_backfill_overrides_crawl_limits(tmp_path: Path) -> None:
     settings = settings_for_backfill(
         make_settings(tmp_path),
         max_pages=80,
         max_items=2200,
-        start_page=22,
         date_from="2024-01-01",
         date_to="2026-04-24",
         date_window_days=7,
@@ -497,38 +482,23 @@ def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
         write_all_json=False,
     )
 
-    assert settings.start_page == 22
     assert settings.max_pages == 80
     assert settings.max_items == 2200
     assert settings.date_from == "2024-01-01"
     assert settings.date_to == "2026-04-24"
     assert settings.date_window_days == 7
 
-
-def test_start_page_walk_skips_earlier_pages_and_collects_requested_page(tmp_path: Path) -> None:
-    pages = {
-        0: index_html(0, "node-100", next_page=1),
-        1: index_html(1, "node-101", next_page=2),
-        2: index_html(2, "node-102", next_page=None),
-    }
-    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=2, max_pages=1, max_items=0)
-
-    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
-
-    assert [item.item_key for item in items] == ["node-102"]
-
-
-def test_duplicate_page_zero_signature_is_not_counted_as_discovered(tmp_path: Path) -> None:
+def test_duplicate_item_keys_are_deduped_after_discovery(tmp_path: Path) -> None:
     page_zero = index_html(0, "node-100", next_page=1)
     pages = {
         0: page_zero,
         1: page_zero,
     }
-    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=1, max_pages=1, max_items=0)
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", max_pages=2, max_items=0)
 
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
-    assert items == []
+    assert [item.item_key for item in items] == ["node-100"]
 
 
 def test_index_page_failure_retries_same_page_before_collecting(tmp_path: Path) -> None:
@@ -550,32 +520,40 @@ def test_index_page_failure_retries_same_page_before_collecting(tmp_path: Path) 
     assert [item.item_key for item in items] == ["node-100", "node-101"]
 
 
-def test_later_form_submit_reset_is_not_counted_as_requested_page(tmp_path: Path) -> None:
+def test_index_page_retry_exhaustion_returns_partial_results(tmp_path: Path) -> None:
     pages = {
         0: index_html(0, "node-100", next_page=1),
-        1: unsubmitted_form_html(),
+        1: [failure_html(), failure_html()],
     }
-    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=1, max_pages=1, max_items=0)
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=2,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
 
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
-    assert items == []
+    assert [item.item_key for item in items] == ["node-100"]
 
 
-def test_duplicate_page_zero_while_walking_to_start_fails_clearly(tmp_path: Path) -> None:
-    page_zero = index_html(0, "node-100", next_page=1)
+def test_detail_page_failure_retries_same_url_before_parsing(tmp_path: Path) -> None:
+    detail_html = (Path(__file__).parent / "fixtures" / "detail.html").read_text(encoding="utf-8")
     pages = {
-        0: page_zero,
-        1: page_zero,
+        0: [failure_html(), detail_html],
     }
-    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=2, max_pages=1, max_items=0)
+    settings = replace(
+        make_settings(tmp_path),
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
 
-    try:
-        asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
-    except Exception as exc:
-        assert "could not reach start page 2" in str(exc)
-    else:
-        raise AssertionError("duplicate page while walking to start should fail clearly")
+    metadata = asyncio.run(fetch_detail(FakeContext(pages), make_index_item(), settings, tmp_path / "debug"))
+
+    assert metadata.case_number == "UPC_CFI_101/2026"
+    assert metadata.pdf_links[0].url.endswith("ORD_10339_2026_EN.pdf")
 
 
 def test_date_window_discovery_collects_shallow_windows(tmp_path: Path) -> None:
@@ -596,6 +574,27 @@ def test_date_window_discovery_collects_shallow_windows(tmp_path: Path) -> None:
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
     assert [item.item_key for item in items] == ["node-101", "node-102"]
+
+
+def test_date_window_failure_retries_same_window_before_collecting(tmp_path: Path) -> None:
+    pages = {
+        ("2026-04-01", "2026-04-07"): [failure_html(), index_html(1, "node-101")],
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        date_from="2026-04-01",
+        date_to="2026-04-07",
+        date_window_days=7,
+        max_pages=0,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-101"]
 
 
 def test_date_window_discovery_splits_truncated_window_without_counting_parent(tmp_path: Path) -> None:

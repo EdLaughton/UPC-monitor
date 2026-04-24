@@ -94,11 +94,6 @@ def select_next_index_url(source_url: str, requested_page_number: int, actual_ur
         return direct_next
     return absolute_next
 
-
-def item_signature(items: list[IndexItem]) -> tuple[str, ...]:
-    return tuple(item.item_key for item in items)
-
-
 def parse_result_total(html: str) -> int | None:
     match = re.search(r"Displaying\s+\d+\s*-\s*\d+\s+of\s+(\d+)", html, flags=re.I)
     if not match:
@@ -226,34 +221,6 @@ async def submit_decisions_form(page, settings: Settings) -> bool:
     return False
 
 
-async def click_next_pager(page, settings: Settings) -> bool:
-    """Advance by clicking the rendered Drupal pager's next link.
-
-    The UPC page emits ordinary pager hrefs, but in practice directly loading
-    the extracted page=1 URL can sometimes produce an empty result set. Clicking
-    the rendered link keeps the same browser/page state and gives Drupal's
-    behaviours a chance to handle the pager in the same way as a normal browser.
-    """
-    selectors = (
-        "li.pager__item--next a[href]",
-        "a[rel='next'][href]",
-        "a[title='Go to next page'][href]",
-    )
-    for selector in selectors:
-        try:
-            locator = page.locator(selector).first
-            if not await locator.count():
-                continue
-            href = await locator.get_attribute("href")
-            logger.info("clicking UPC next pager link %s", href or "")
-            await locator.click(timeout=settings.navigation_timeout_ms)
-            await settle_page(page, settings)
-            return True
-        except Exception as exc:
-            logger.debug("could not click pager link %s: %s", selector, exc)
-    return False
-
-
 def dedupe_items(items: list[IndexItem]) -> list[IndexItem]:
     seen: set[str] = set()
     deduped: list[IndexItem] = []
@@ -286,8 +253,66 @@ def needs_enrichment(decision: dict[str, object] | None) -> bool:
     )
 
 
-async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, page_number: int) -> tuple[str, list[IndexItem], bool]:
-    html = await page.content()
+async def load_upc_html_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    url: str,
+    debug_prefix: str,
+    description: str,
+) -> str:
+    max_retries = max(settings.index_page_max_retries, 0)
+    max_attempts = max_retries + 1
+    last_html = ""
+    for attempt in range(1, max_attempts + 1):
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+            await accept_cookies(page)
+            await settle_page(page, settings)
+            html = await page.content()
+        except Exception as exc:
+            if attempt >= max_attempts:
+                raise ScraperError(f"UPC {description} could not be loaded after {max_attempts} attempt(s): {exc}") from exc
+            logger.warning(
+                "UPC %s could not be loaded on attempt %s/%s; retrying same URL after %s second(s): %s",
+                description,
+                attempt,
+                max_attempts,
+                settings.index_page_retry_delay_seconds,
+                exc,
+            )
+            await asyncio.sleep(settings.index_page_retry_delay_seconds)
+            continue
+
+        last_html = html
+        if not is_failure_page(html):
+            return html
+
+        await save_debug(debug_dir, f"{debug_prefix}-failure-attempt-{attempt}", html, page)
+        if attempt >= max_attempts:
+            break
+
+        logger.warning(
+            "UPC %s failed transiently on attempt %s/%s; retrying same URL after %s second(s): %s",
+            description,
+            attempt,
+            max_attempts,
+            settings.index_page_retry_delay_seconds,
+            url,
+        )
+        await asyncio.sleep(settings.index_page_retry_delay_seconds)
+
+    await save_debug(debug_dir, f"{debug_prefix}-failure", last_html, page)
+    raise ScraperError(f"UPC {description} appears to be unavailable or challenged after {max_attempts} attempt(s)")
+
+
+async def parse_or_submit_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    page_number: int,
+    html: str,
+) -> tuple[str, list[IndexItem], bool]:
     if is_failure_page(html):
         await save_debug(debug_dir, f"index-page-{page_number}-failure", html, page)
         raise ScraperError(f"UPC index page {page_number} appears to be unavailable or challenged")
@@ -308,49 +333,6 @@ async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, 
     page_items = parse_index_page(html, page.url)
     logger.info("UPC index page %s yielded %s item(s) after form submit", page_number, len(page_items))
     return html, page_items, True
-
-
-def is_retryable_index_page_error(exc: Exception) -> bool:
-    if not isinstance(exc, ScraperError):
-        return False
-    message = str(exc)
-    return (
-        "appears to be unavailable or challenged" in message
-        or "became unavailable or challenged" in message
-    )
-
-
-async def load_and_parse_index_page(
-    page,
-    settings: Settings,
-    debug_dir: Path,
-    page_number: int,
-    url: str,
-    needs_goto: bool,
-) -> tuple[str, list[IndexItem], bool]:
-    max_retries = max(settings.index_page_max_retries, 0)
-    max_attempts = max_retries + 1
-    for attempt in range(1, max_attempts + 1):
-        try:
-            if needs_goto:
-                await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
-            await accept_cookies(page)
-            await settle_page(page, settings)
-            return await parse_or_submit_index_page(page, settings, debug_dir, page_number)
-        except Exception as exc:
-            if attempt >= max_attempts or not is_retryable_index_page_error(exc):
-                raise
-            logger.warning(
-                "UPC index page %s failed transiently on attempt %s/%s; retrying after %s second(s): %s",
-                page_number,
-                attempt,
-                max_attempts,
-                settings.index_page_retry_delay_seconds,
-                exc,
-            )
-            await asyncio.sleep(settings.index_page_retry_delay_seconds)
-
-    raise AssertionError("unreachable index page retry loop")
 
 
 async def discover_date_window_items_for_source(page, settings: Settings, debug_dir: Path, source_url: str) -> list[IndexItem]:
@@ -376,10 +358,15 @@ async def discover_date_window_items_for_source(page, settings: Settings, debug_
 
         url = build_date_index_url(source_url, window_start, window_end)
         logger.info("discovering UPC date window %s..%s: %s", window_start, window_end, url)
-        await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
-        await accept_cookies(page)
-        await settle_page(page, settings)
-        html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, 0)
+        html = await load_upc_html_page(
+            page,
+            settings,
+            debug_dir,
+            url,
+            f"date-window-{window_start.isoformat()}-{window_end.isoformat()}",
+            f"date window {window_start.isoformat()}..{window_end.isoformat()}",
+        )
+        html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, 0, html)
         actual_url = page.url
         total = parse_result_total(html)
         has_next_page = bool(extract_next_page_url(html, actual_url))
@@ -467,38 +454,31 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
         items: list[IndexItem] = []
         try:
             seen_urls: set[str] = set()
-            page_signatures: dict[int, tuple[str, ...]] = {}
             page_number = 0
             pages_collected = 0
             url = build_index_url(source_url, 0)
-            needs_goto = True
             while url:
-                if needs_goto and url in seen_urls:
+                if url in seen_urls:
                     logger.warning("stopping discovery because pager looped back to %s", url)
                     break
-                if needs_goto:
-                    seen_urls.add(url)
+                seen_urls.add(url)
 
                 logger.info(
-                    "discovering UPC index requested_page=%s start_page=%s url=%s navigation=%s",
+                    "discovering UPC index requested_page=%s url=%s",
                     page_number,
-                    settings.start_page,
                     url,
-                    "goto" if needs_goto else "clicked-page",
                 )
-                html, page_items, submitted_form = await load_and_parse_index_page(
+                html = await load_upc_html_page(
                     page,
                     settings,
                     debug_dir,
-                    page_number,
                     url,
-                    needs_goto,
+                    f"index-page-{page_number}",
+                    f"index page {page_number}",
                 )
+                html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
                 actual_url = page.url
                 actual_page_number = parse_page_number(actual_url)
-                signature = item_signature(page_items)
-                if page_number == 0 and signature:
-                    page_signatures[0] = signature
                 logger.info(
                     "UPC index requested_page=%s actual_url=%s parsed_actual_page=%s item_count=%s",
                     page_number,
@@ -520,8 +500,6 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                         message,
                     )
                     logger.warning("%s", message)
-                    if page_number < settings.start_page:
-                        raise ScraperError(f"could not reach start page {settings.start_page}: {message}")
                     break
 
                 if page_number == 0 and not page_items:
@@ -533,23 +511,6 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                         "No decision rows were found in the first index page even after any available form submit.",
                     )
                     raise ScraperError("no decision rows found on the first UPC index page")
-
-                if page_number > 0 and page_signatures.get(0) and signature == page_signatures[0]:
-                    message = (
-                        f"UPC index requested page {page_number} yielded the same item signature as page 0; "
-                        "treating it as a reset/duplicate page"
-                    )
-                    await save_debug(
-                        debug_dir,
-                        f"index-page-{page_number}-duplicate-page-0",
-                        html,
-                        page,
-                        message,
-                    )
-                    logger.warning("%s", message)
-                    if page_number < settings.start_page:
-                        raise ScraperError(f"could not reach start page {settings.start_page}: {message}")
-                    break
 
                 if page_number > 0 and not page_items:
                     await save_debug(
@@ -566,33 +527,24 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     )
                     break
 
-                collecting = page_number >= settings.start_page
-                if collecting:
-                    cumulative = len(items) + len(page_items)
-                    logger.info(
-                        "index page %s yielded %s collected items (cumulative discovered before dedupe: %s)",
-                        page_number,
-                        len(page_items),
-                        cumulative,
-                    )
-                    items.extend(page_items)
-                    pages_collected += 1
-                    logger.info(
-                        "discovery progress: requested_page=%s pages_collected=%s cumulative_item_count=%s",
-                        page_number,
-                        pages_collected,
-                        len(items),
-                    )
-                    if settings.max_items and len(items) >= settings.max_items:
-                        logger.info("stopping discovery at MAX_ITEMS=%s", settings.max_items)
-                        break
-                else:
-                    logger.info(
-                        "walk-to-start skipping requested_page=%s with %s item(s); collection starts at page %s",
-                        page_number,
-                        len(page_items),
-                        settings.start_page,
-                    )
+                cumulative = len(items) + len(page_items)
+                logger.info(
+                    "index page %s yielded %s collected items (cumulative discovered before dedupe: %s)",
+                    page_number,
+                    len(page_items),
+                    cumulative,
+                )
+                items.extend(page_items)
+                pages_collected += 1
+                logger.info(
+                    "discovery progress: requested_page=%s pages_collected=%s cumulative_item_count=%s",
+                    page_number,
+                    pages_collected,
+                    len(items),
+                )
+                if settings.max_items and len(items) >= settings.max_items:
+                    logger.info("stopping discovery at MAX_ITEMS=%s", settings.max_items)
+                    break
 
                 if settings.max_pages and pages_collected >= settings.max_pages:
                     logger.info("stopping discovery at MAX_PAGES=%s", settings.max_pages)
@@ -611,28 +563,9 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     next_url,
                 )
 
-                raw_next_absolute = urljoin(actual_url or source_url, raw_next_url)
-                should_click = raw_next_absolute == next_url
-                previous_url = actual_url
-                clicked = await click_next_pager(page, settings) if should_click or page_number < settings.start_page else False
-                clicked_page_number = parse_page_number(page.url) if clicked else -1
-                if clicked:
-                    page_number += 1
-                    url = page.url
-                    needs_goto = False
-                    if url == previous_url or clicked_page_number <= page_number - 1:
-                        # Some Drupal behaviours keep the browser URL stable; in
-                        # that case retain a deterministic loop key while still
-                        # parsing the clicked page next instead of reloading it.
-                        url = next_url
-                    continue
-                if page_number < settings.start_page:
-                    raise ScraperError(f"could not reach start page {settings.start_page}: next pager could not be clicked")
-
                 logger.info("using selected next pager URL: %s", next_url)
                 url = next_url
                 page_number = next_page_number if next_page_number > page_number else page_number + 1
-                needs_goto = True
 
             return cap_items(dedupe_items(items), settings)
         except Exception as exc:
@@ -658,13 +591,14 @@ async def fetch_detail(context, item: IndexItem, settings: Settings, debug_dir: 
     page = await context.new_page()
     try:
         logger.info("fetching UPC detail page %s", item.node_url)
-        await page.goto(item.node_url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
-        await accept_cookies(page)
-        await settle_page(page, settings)
-        html = await page.content()
-        if is_failure_page(html):
-            await save_debug(debug_dir, f"{item.item_key}-detail-failure", html, page)
-            raise ScraperError(f"UPC detail page appears unavailable for {item.item_key}")
+        html = await load_upc_html_page(
+            page,
+            settings,
+            debug_dir,
+            item.node_url,
+            f"{item.item_key}-detail",
+            f"detail page for {item.item_key}",
+        )
         metadata = parse_detail_page(html, page.url)
         if not metadata.pdf_links:
             await save_debug(

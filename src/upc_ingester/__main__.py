@@ -27,7 +27,6 @@ def build_parser() -> argparse.ArgumentParser:
     backfill = subparsers.add_parser("backfill", help="run a deliberate broader one-off crawl for statistics/backfill")
     backfill.add_argument("--max-pages", type=int, default=0, help="maximum UPC index pages to inspect; 0 means unlimited")
     backfill.add_argument("--max-items", type=int, default=0, help="maximum UPC items to ingest; 0 means unlimited")
-    backfill.add_argument("--start-page", type=int, default=0, help="UPC index page number to start from; default 0")
     backfill.add_argument("--date-from", default="", help="oldest decision date to include, YYYY-MM-DD")
     backfill.add_argument("--date-to", default="", help="newest decision date to include, YYYY-MM-DD; default today in UTC")
     backfill.add_argument(
@@ -40,13 +39,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--index-page-retry-delay-seconds",
         type=int,
         default=30,
-        help="seconds to wait before retrying a transient UPC index-page failure/challenge",
+        help="seconds to wait before retrying a transient UPC HTML page failure/challenge",
     )
     backfill.add_argument(
         "--index-page-max-retries",
         type=int,
         default=3,
-        help="maximum retries for the same UPC index page before returning partial results",
+        help="maximum retries for the same UPC HTML page before returning partial index results",
     )
     backfill.add_argument(
         "--write-all-json",
@@ -78,7 +77,6 @@ def settings_for_backfill(
     base: Settings,
     max_pages: int,
     max_items: int,
-    start_page: int,
     date_from: str,
     date_to: str,
     date_window_days: int,
@@ -103,7 +101,6 @@ def settings_for_backfill(
         page_wait_timeout_ms=base.page_wait_timeout_ms,
         max_pages=max_pages,
         max_items=max_items,
-        start_page=start_page,
         date_from=date_from,
         date_to=date_to,
         date_window_days=date_window_days,
@@ -137,7 +134,6 @@ async def main_async() -> int:
         # still read Settings.from_env indirectly.
         os.environ["MAX_PAGES"] = str(args.max_pages)
         os.environ["MAX_ITEMS"] = str(args.max_items)
-        os.environ["START_PAGE"] = str(args.start_page)
         os.environ["DATE_FROM"] = args.date_from
         os.environ["DATE_TO"] = args.date_to
         os.environ["DATE_WINDOW_DAYS"] = str(args.date_window_days)
@@ -149,7 +145,6 @@ async def main_async() -> int:
             settings,
             max_pages=args.max_pages,
             max_items=args.max_items,
-            start_page=args.start_page,
             date_from=args.date_from,
             date_to=args.date_to,
             date_window_days=args.date_window_days,

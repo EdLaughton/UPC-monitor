@@ -78,7 +78,6 @@ class Settings:
     page_wait_timeout_ms: int
     max_pages: int
     max_items: int
-    start_page: int
     date_from: str
     date_to: str
     date_window_days: int
@@ -108,7 +107,6 @@ class Settings:
             page_wait_timeout_ms=env_int("PAGE_WAIT_TIMEOUT_MS", 20000),
             max_pages=env_int("MAX_PAGES", 1),
             max_items=env_int("MAX_ITEMS", 10),
-            start_page=env_int("START_PAGE", 0),
             date_from=os.getenv("DATE_FROM", ""),
             date_to=os.getenv("DATE_TO", ""),
             date_window_days=env_int("DATE_WINDOW_DAYS", 0),

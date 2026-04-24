@@ -106,7 +106,11 @@ Resume from a later date:
 python -m upc_ingester backfill --index-only --date-from 2025-01-01 --date-to 2025-12-31 --date-window-days 7 --max-items 2200
 ```
 
-`--start-page` remains available for diagnostics, but it is not recommended for large historical backfills because walking rendered pager links can trigger Cloudflare challenges.
+Simple live smoke check:
+
+```bash
+python -m upc_ingester backfill --index-only --max-pages 1 --max-items 10 --index-page-retry-delay-seconds 30 --index-page-max-retries 3
+```
 
 Docker example against the persistent `/data` volume:
 
@@ -147,10 +151,11 @@ Environment variables:
 - `FALLBACK_SOURCE_URL`: fallback official alias, default `https://www.unified-patent-court.org/en/decisions-and-orders`
 - `MAX_PAGES`: index page discovery cap, default `1` for gentle hourly polling; `backfill` is uncapped
 - `MAX_ITEMS`: item discovery cap, default `10` for gentle hourly polling; `backfill` is uncapped
-- `START_PAGE`: optional index page number to start from, default `0`; usually set via `backfill --start-page`
 - `DATE_FROM`: optional oldest decision date for date-window backfill, default `2024-01-01` when date-window mode is enabled
 - `DATE_TO`: optional newest decision date for date-window backfill, default today when date-window mode is enabled
 - `DATE_WINDOW_DAYS`: date-window size for shallow historical discovery, default `0` disabled; usually set via `backfill --date-window-days`
+- `INDEX_PAGE_RETRY_DELAY_SECONDS`: seconds to wait before retrying a UPC HTML page that appears unavailable or challenged, default `30`
+- `INDEX_PAGE_MAX_RETRIES`: retry count for the same UPC HTML page URL before failing or returning partial index results, default `3`
 
 ## Unraid Compose Alternative
 
@@ -183,7 +188,7 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 
 - The ingester uses Playwright Chromium for both page access and PDF downloads so cookies and headers match the browser session.
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
-- Use `python -m upc_ingester backfill --index-only --date-from 2024-01-01 --date-window-days 7 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. Date-window mode is preferred over `--start-page` for large historical runs.
+- Use `python -m upc_ingester backfill --index-only --date-from 2024-01-01 --date-window-days 7 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. Date-window mode is preferred for large historical runs because it avoids deep pagination.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - `/stats.html` and `/stats.json` are generated from already-ingested SQLite records only. The statistics are descriptive and separate UPC decision/order statistics from scraper/data-quality health.
 - `/status.json` is operational run status. `/all.ndjson` is a full machine-readable export, while `/latest.json` is capped by `LATEST_EXPORT_LIMIT`.
