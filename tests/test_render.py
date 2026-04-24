@@ -63,9 +63,21 @@ def test_render_outputs_preserve_full_json_and_preview_html(tmp_path: Path) -> N
     render_outputs(db, public_dir)
 
     latest = json.loads((public_dir / "latest.json").read_text(encoding="utf-8"))
+    stats = json.loads((public_dir / "stats.json").read_text(encoding="utf-8"))
     html = (public_dir / "index.html").read_text(encoding="utf-8")
+    stats_html = (public_dir / "stats.html").read_text(encoding="utf-8")
 
     assert latest["items"][0]["headnote_raw"].endswith("unique-tail")
     assert latest["items"][0]["documents"][0]["pdf_url_mirror"] == "/pdfs/2026/node-1/official.pdf"
+    assert stats["record_count"] == 1
+    assert "upc_stats" in stats
+    assert "data_quality" in stats
+    assert stats["upc_stats"]["headline"]["total_records"] == 1
+    assert stats["data_quality"]["headline"]["items_with_mirror_pdf"] == 1
+    assert "Statistics dashboard" in html
+    assert "/stats.html" in html
+    assert "/stats.json" in html
+    assert "UPC Decisions Mirror Statistics" in stats_html
+    assert "Scraper/Data-Quality Health" in stats_html
     assert "unique-tail" not in html
     assert "/pdfs/2026/node-1/official.pdf" in html

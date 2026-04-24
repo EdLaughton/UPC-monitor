@@ -1,0 +1,367 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UPC Decisions Mirror Statistics</title>
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      color: #172033;
+      background: #f7f8fa;
+    }
+    header {
+      padding: 24px;
+      background: #ffffff;
+      border-bottom: 1px solid #d9dee7;
+    }
+    main {
+      padding: 24px;
+      max-width: 1440px;
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 24px;
+      font-weight: 650;
+    }
+    h2 {
+      margin: 32px 0 12px;
+      font-size: 20px;
+    }
+    h3 {
+      margin: 24px 0 10px;
+      font-size: 16px;
+    }
+    p {
+      margin: 0 0 12px;
+      color: #526072;
+    }
+    nav {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      margin-top: 14px;
+      font-size: 14px;
+    }
+    a {
+      color: #0c5aa6;
+    }
+    section {
+      margin-top: 24px;
+    }
+    .health {
+      border-top: 4px solid #7b8794;
+      background: #f0f3f7;
+      padding-top: 1px;
+    }
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 12px;
+    }
+    .card {
+      background: #ffffff;
+      border: 1px solid #d9dee7;
+      border-radius: 6px;
+      padding: 14px;
+    }
+    .card strong {
+      display: block;
+      font-size: 22px;
+      margin-bottom: 4px;
+    }
+    .card span {
+      color: #526072;
+      font-size: 13px;
+    }
+    .table-wrap {
+      overflow-x: auto;
+      margin-bottom: 18px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: #ffffff;
+      font-size: 14px;
+    }
+    th, td {
+      border-bottom: 1px solid #d9dee7;
+      padding: 9px 10px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th {
+      background: #eef2f6;
+      color: #243248;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+    td.numeric {
+      text-align: right;
+      white-space: nowrap;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+      gap: 18px;
+    }
+    .bar {
+      display: inline-block;
+      min-width: 2px;
+      height: 10px;
+      background: #4b7bec;
+      border-radius: 2px;
+    }
+    .muted {
+      color: #526072;
+    }
+  </style>
+</head>
+<body>
+  {% set upc = stats.upc_stats %}
+  {% set quality = stats.data_quality %}
+  {% macro cards(values) %}
+    <div class="cards">
+      {% for label, value in values %}
+      <div class="card"><strong>{{ value }}</strong><span>{{ label }}</span></div>
+      {% endfor %}
+    </div>
+  {% endmacro %}
+  {% macro count_table(rows, label="Value") %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>{{ label }}</th><th>Count</th>{% if rows and rows[0].percent is defined %}<th>%</th>{% endif %}</tr></thead>
+        <tbody>
+          {% for row in rows %}
+          <tr>
+            <td>{{ row.value }}</td>
+            <td class="numeric">{{ row.count }}</td>
+            {% if row.percent is defined %}<td class="numeric">{{ row.percent }}</td>{% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endmacro %}
+  {% macro item_links(items) %}
+    {% for item in items[:8] %}
+      {% if item.node_url %}<a href="{{ item.node_url }}">{{ item.item_key }}</a>{% else %}{{ item.item_key }}{% endif %}
+      {% if item.case_number %}<span class="muted">({{ item.case_number }})</span>{% endif %}{% if not loop.last %}, {% endif %}
+    {% endfor %}
+  {% endmacro %}
+  <header>
+    <h1>UPC Decisions Mirror Statistics</h1>
+    <p>Generated {{ generated_at }} from {{ stats.record_count }} stored decision/order records. This page is descriptive only and separates UPC decision/order statistics from scraper/data-quality health.</p>
+    <p><a href="/index.html">Mirror table</a> · <a href="/stats.json">stats.json</a> · <a href="/latest.json">latest.json</a> · <a href="/status.json">status.json</a> · <a href="/all.ndjson">all.ndjson</a></p>
+    <nav>
+      <a href="#overview">Overview</a>
+      <a href="#upc-statistics">UPC decision/order statistics</a>
+      <a href="#parties">Party and related-case statistics</a>
+      <a href="#references">Headnote, keyword and legal-reference statistics</a>
+      <a href="#health">Scraper/data-quality health</a>
+    </nav>
+  </header>
+  <main>
+    <section id="overview">
+      <h2>Overview</h2>
+      <h3>UPC Dataset Headline Cards</h3>
+      {{ cards([
+        ("Total UPC decision/order records", upc.headline.total_records),
+        ("Total unique adverse pairs", upc.headline.total_unique_adverse_pairs),
+        ("Total unique parties", upc.headline.total_unique_parties),
+        ("Total unique PDF hashes", upc.headline.total_unique_pdf_hashes),
+        ("Latest decision date", upc.headline.latest_decision_date or "n/a"),
+        ("Earliest decision date", upc.headline.earliest_decision_date or "n/a"),
+        ("Latest ingested_at", upc.headline.latest_ingested_at or "n/a"),
+        ("Generated at", upc.headline.generated_at),
+      ]) }}
+      <h3>Scraper/Data-Quality Headline Cards</h3>
+      {{ cards([
+        ("Items with official PDF", quality.headline.items_with_official_pdf),
+        ("Items with mirror PDF", quality.headline.items_with_mirror_pdf),
+        ("Items with no PDF", quality.headline.items_with_no_pdf),
+        ("Items with headnote", quality.headline.items_with_headnote),
+        ("Items with keywords", quality.headline.items_with_keywords),
+        ("Items with last_error", quality.headline.items_with_last_error),
+        ("Items with blank division", quality.headline.items_with_blank_division),
+        ("Items with blank language", quality.headline.items_with_blank_language),
+        ("Items with empty documents[]", quality.headline.items_with_empty_documents),
+      ]) }}
+    </section>
+
+    <section id="upc-statistics">
+      <h2>UPC Decision/Order Statistics</h2>
+      <div class="grid">
+        <div>
+          <h3>Items per Month by decision_date</h3>
+          {{ count_table(upc.activity.by_month, "Month") }}
+        </div>
+        <div>
+          <h3>Items per Week by decision_date</h3>
+          {{ count_table(upc.activity.by_week, "Week") }}
+        </div>
+      </div>
+      <div class="grid">
+        <div>
+          <h3>Cumulative Item Count</h3>
+          {{ count_table(upc.activity.cumulative_by_month, "Month") }}
+        </div>
+        <div>
+          <h3>Busiest Decision Dates</h3>
+          {{ count_table(upc.activity.busiest_decision_dates, "Decision date") }}
+        </div>
+      </div>
+      <h3>Division League Table</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Division</th><th>Court level</th><th>Count</th><th>%</th><th>With PDFs</th><th>With headnotes</th><th>Mirror data-quality errors</th><th>Most common action type</th></tr></thead>
+          <tbody>
+            {% for row in upc.divisions.by_division %}
+            <tr>
+              <td>{{ row.division }}</td><td>{{ row.court_level }}</td><td class="numeric">{{ row.count }}</td><td class="numeric">{{ row.percent }}</td>
+              <td class="numeric">{{ row.with_pdfs }}</td><td class="numeric">{{ row.with_headnotes }}</td><td class="numeric">{{ row.mirror_data_quality_errors }}</td><td>{{ row.most_common_action_type }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="grid">
+        <div><h3>Court Level</h3>{{ count_table(upc.divisions.by_court_level, "Court level") }}</div>
+        <div><h3>Document Types</h3>{{ count_table(upc.types.by_document_type, "Document type") }}</div>
+        <div><h3>Title Raw</h3>{{ count_table(upc.types.by_title_raw, "Title") }}</div>
+        <div><h3>Type of Action</h3>{{ count_table(upc.types.by_type_of_action, "Type of action") }}</div>
+      </div>
+      <h3>Type of Action by Month</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Month</th><th>Type of action</th><th>Count</th></tr></thead>
+          <tbody>{% for row in upc.types.type_of_action_by_month[:80] %}<tr><td>{{ row.month }}</td><td>{{ row.type_of_action }}</td><td class="numeric">{{ row.count }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <div class="grid">
+        <div><h3>Item Language Counts</h3>{{ count_table(upc.languages.item_languages, "Language") }}</div>
+        <div><h3>Document Language Counts</h3>{{ count_table(upc.languages.document_languages, "Document language") }}</div>
+      </div>
+      <h3>Language by Division</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Division</th><th>Language</th><th>Count</th></tr></thead>
+          <tbody>{% for row in upc.languages.language_by_division %}<tr><td>{{ row.division }}</td><td>{{ row.language }}</td><td class="numeric">{{ row.count }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="parties">
+      <h2>Party and Related-Case Statistics</h2>
+      <div class="grid">
+        <div><h3>Top Parties Overall</h3>{{ count_table(upc.parties.top_parties, "Party") }}</div>
+        <div><h3>Top Claimants</h3>{{ count_table(upc.parties.top_claimants, "Claimant") }}</div>
+        <div><h3>Top Defendants</h3>{{ count_table(upc.parties.top_defendants, "Defendant") }}</div>
+      </div>
+      <h3>Adverse Pairs with More Than One Item</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Adverse pair key</th><th>Caption</th><th>Count</th><th>Case numbers</th><th>Action types</th><th>Decision dates</th></tr></thead>
+          <tbody>{% for row in upc.related_cases.adverse_pair_clusters %}<tr><td>{{ row.adverse_pair_key }}</td><td>{{ row.caption }}</td><td class="numeric">{{ row.count }}</td><td>{{ row.case_numbers|join(", ") }}</td><td>{{ row.action_types|join(", ") }}</td><td>{{ row.decision_dates|join(", ") }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <h3>Duplicate PDF Hash Clusters</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>PDF SHA-256</th><th>Count</th><th>Case numbers</th><th>Action types</th><th>Items</th></tr></thead>
+          <tbody>{% for row in upc.related_cases.duplicate_pdf_hash_clusters %}<tr><td>{{ row.pdf_sha256 }}</td><td class="numeric">{{ row.count }}</td><td>{{ row.case_numbers|join(", ") }}</td><td>{{ row.action_types|join(", ") }}</td><td>{{ item_links(row["items"]) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <h3>Same Parties Across Different Type of Action Values</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Party key</th><th>Count</th><th>Action types</th><th>Items</th></tr></thead>
+          <tbody>{% for row in upc.related_cases.same_parties_across_action_types %}<tr><td>{{ row.party_key }}</td><td class="numeric">{{ row.count }}</td><td>{{ row.action_types|join(", ") }}</td><td>{{ item_links(row["items"]) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <h3>Same Adverse Pair Across Different Case or Registry Numbers</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Adverse pair key</th><th>Caption</th><th>Count</th><th>Case numbers</th><th>Registry numbers</th></tr></thead>
+          <tbody>{% for row in upc.related_cases.adverse_pairs_across_case_numbers %}<tr><td>{{ row.adverse_pair_key }}</td><td>{{ row.caption }}</td><td class="numeric">{{ row.count }}</td><td>{{ row.case_numbers|join(", ") }}</td><td>{{ row.registry_numbers|join(", ") }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+      <div class="grid">
+        <div>
+          <h3>Cases with Multiple Claimants</h3>
+          <div class="table-wrap"><table><thead><tr><th>Item</th><th>Claimants</th></tr></thead><tbody>{% for row in upc.parties.cases_with_multiple_claimants %}<tr><td>{{ row.item_key }}</td><td>{{ row.claimants|join(", ") }}</td></tr>{% endfor %}</tbody></table></div>
+        </div>
+        <div>
+          <h3>Cases with Multiple Defendants</h3>
+          <div class="table-wrap"><table><thead><tr><th>Item</th><th>Defendants</th></tr></thead><tbody>{% for row in upc.parties.cases_with_multiple_defendants %}<tr><td>{{ row.item_key }}</td><td>{{ row.defendants|join(", ") }}</td></tr>{% endfor %}</tbody></table></div>
+        </div>
+      </div>
+      <h3>Metadata-Derived Party-Quality Checks</h3>
+      <div class="table-wrap"><table><thead><tr><th>Item</th><th>Parties raw</th></tr></thead><tbody>{% for row in upc.parties.metadata_party_quality_checks %}<tr><td>{{ row.item_key }}</td><td>{{ row.parties_raw }}</td></tr>{% endfor %}</tbody></table></div>
+    </section>
+
+    <section id="references">
+      <h2>Headnote, Keyword and Legal-Reference Statistics</h2>
+      {{ cards([
+        ("Items with non-empty headnote_text", upc.headnotes_keywords.items_with_headnote),
+        ("Headnote coverage %", upc.headnotes_keywords.headnote_coverage_percent),
+        ("Items with keywords", upc.headnotes_keywords.items_with_keywords),
+        ("Keyword coverage %", upc.headnotes_keywords.keyword_coverage_percent),
+        ("Average headnote length", upc.headnotes_keywords.average_headnote_length),
+        ("Median headnote length", upc.headnotes_keywords.median_headnote_length),
+      ]) }}
+      <div class="grid">
+        <div><h3>Top Keywords</h3>{{ count_table(upc.headnotes_keywords.top_keywords, "Keyword") }}</div>
+        <div><h3>Headnote Coverage by Division</h3><div class="table-wrap"><table><thead><tr><th>Division</th><th>Items</th><th>With headnote</th><th>Coverage %</th></tr></thead><tbody>{% for row in upc.headnotes_keywords.headnote_coverage_by_division %}<tr><td>{{ row.division }}</td><td class="numeric">{{ row.count }}</td><td class="numeric">{{ row.covered }}</td><td class="numeric">{{ row.coverage_percent }}</td></tr>{% endfor %}</tbody></table></div></div>
+      </div>
+      <h3>Extracted Legal References</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Reference</th><th>Count</th><th>Example linked items</th></tr></thead>
+          <tbody>{% for row in upc.legal_references.top_references %}<tr><td>{{ row.reference }}</td><td class="numeric">{{ row.count }}</td><td>{{ item_links(row.examples) }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="health" class="health">
+      <h2>Scraper/Data-Quality Health</h2>
+      <p>This section covers mirror completeness, ingestion errors, and metadata quality. These are not presented as UPC legal or case-law trends.</p>
+      <h3>Items with last_error</h3>
+      <div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Division</th><th>Error</th></tr></thead><tbody>{% for row in quality.errors["items"] %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.division }}</td><td>{{ row.last_error }}</td></tr>{% endfor %}</tbody></table></div>
+      <div class="grid">
+        <div><h3>Blank Language</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Division</th><th>Document</th></tr></thead><tbody>{% for row in quality.blank_fields.blank_language %}<tr><td>{{ row.item_key }}</td><td>{{ row.division }}</td><td>{{ row.document_type }}</td></tr>{% endfor %}</tbody></table></div></div>
+        <div><h3>Empty documents[]</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Last known document</th></tr></thead><tbody>{% for row in quality.pdfs.items_with_empty_documents %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.document_type }}</td></tr>{% endfor %}</tbody></table></div></div>
+      </div>
+      <div class="grid">
+        <div><h3>No Official PDF</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Document</th></tr></thead><tbody>{% for row in quality.pdfs.items_with_no_official_pdf %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.document_type }}</td></tr>{% endfor %}</tbody></table></div></div>
+        <div><h3>No Mirror PDF</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Document</th></tr></thead><tbody>{% for row in quality.pdfs.items_with_no_mirror_pdf %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.document_type }}</td></tr>{% endfor %}</tbody></table></div></div>
+      </div>
+      <div class="grid">
+        <div><h3>Blank Headnote</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Division</th></tr></thead><tbody>{% for row in quality.blank_fields.blank_headnote %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.division }}</td></tr>{% endfor %}</tbody></table></div></div>
+        <div><h3>Blank Keywords</h3><div class="table-wrap"><table><thead><tr><th>Item</th><th>Date</th><th>Division</th></tr></thead><tbody>{% for row in quality.blank_fields.blank_keywords %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.division }}</td></tr>{% endfor %}</tbody></table></div></div>
+      </div>
+      <h3>Duplicate PDF Hashes</h3>
+      <div class="table-wrap"><table><thead><tr><th>PDF SHA-256</th><th>Count</th><th>Items</th></tr></thead><tbody>{% for row in quality.pdfs.duplicate_pdf_hashes %}<tr><td>{{ row.pdf_sha256 }}</td><td class="numeric">{{ row.count }}</td><td>{{ item_links(row["items"]) }}</td></tr>{% endfor %}</tbody></table></div>
+      <h3>Records Where document_type Looks Like an Action Type</h3>
+      <div class="table-wrap"><table><thead><tr><th>Item</th><th>Document type</th><th>Type of action</th></tr></thead><tbody>{% for row in quality.metadata_checks.document_type_looks_like_action_type %}<tr><td>{{ row.item_key }}</td><td>{{ row.document_type }}</td><td>{{ row.type_of_action }}</td></tr>{% endfor %}</tbody></table></div>
+      <h3>Invalid or Missing decision_date</h3>
+      <div class="table-wrap"><table><thead><tr><th>Item</th><th>decision_date</th><th>Document</th></tr></thead><tbody>{% for row in quality.metadata_checks.invalid_or_missing_decision_dates %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.document_type }}</td></tr>{% endfor %}</tbody></table></div>
+      <h3>{{ quality.observed_lag.label }}</h3>
+      {{ cards([
+        ("Known lag count", quality.observed_lag.known_count),
+        ("Unknown lag count", quality.observed_lag.unknown_count),
+        ("Mean days", quality.observed_lag.mean_days),
+        ("Median days", quality.observed_lag.median_days),
+        ("Max days", quality.observed_lag.max_days),
+      ]) }}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Item</th><th>Decision date</th><th>Seen at</th><th>Days</th><th>Case number</th></tr></thead>
+          <tbody>{% for row in quality.observed_lag.top_slowest_items %}<tr><td>{{ row.item_key }}</td><td>{{ row.decision_date }}</td><td>{{ row.seen_at }}</td><td class="numeric">{{ row.days }}</td><td>{{ row.case_number }}</td></tr>{% endfor %}</tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

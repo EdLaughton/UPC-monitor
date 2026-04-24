@@ -70,7 +70,12 @@
 <body>
   <header>
     <h1>UPC Decisions Mirror</h1>
-    <p>Generated {{ generated_at }}. Newest decisions are listed first. JSON feed: <a href="/latest.json">/latest.json</a>.</p>
+    <p>
+      Generated {{ generated_at }}. Newest decisions are listed first.
+      <a href="/stats.html">Statistics dashboard</a>.
+      Data: <a href="/latest.json">latest.json</a>, <a href="/stats.json">stats.json</a>,
+      <a href="/status.json">status.json</a>, <a href="/all.ndjson">all.ndjson</a>.
+    </p>
   </header>
   <main>
     {% if decisions %}
