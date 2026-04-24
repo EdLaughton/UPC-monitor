@@ -6,7 +6,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 from .config import Settings
 from .db import Database
@@ -46,6 +46,44 @@ def debug_name(value: str) -> str:
 def strip_query(url: str) -> str:
     parsed = urlparse(url)
     return urlunparse(parsed._replace(query="", fragment=""))
+
+
+def build_index_url(base_url: str, page_number: int) -> str:
+    parsed = urlparse(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    if page_number <= 0:
+        query.pop("page", None)
+    else:
+        query["page"] = str(page_number)
+    return urlunparse(parsed._replace(query=urlencode(query), fragment=""))
+
+
+def parse_page_number(url: str) -> int:
+    parsed = urlparse(url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    try:
+        return int(query.get("page") or 0)
+    except ValueError:
+        return 0
+
+
+def select_next_index_url(source_url: str, requested_page_number: int, actual_url: str, next_url: str) -> str:
+    requested_next = requested_page_number + 1
+    direct_next = build_index_url(source_url, requested_next)
+    if not next_url:
+        return ""
+    absolute_next = urljoin(actual_url or source_url, next_url)
+    parsed_next = parse_page_number(absolute_next)
+    if parsed_next <= requested_page_number:
+        logger.warning(
+            "UPC next pager moved backwards or reset: requested_page=%s actual_url=%s parsed_next_page=%s; using direct URL %s",
+            requested_page_number,
+            actual_url,
+            parsed_next,
+            direct_next,
+        )
+        return direct_next
+    return absolute_next
 
 
 def discovery_sources(settings: Settings) -> list[str]:
@@ -235,31 +273,39 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
         items: list[IndexItem] = []
         try:
             seen_urls: set[str] = set()
-            page_number = 0
-            url = source_url
+            page_number = settings.start_page
+            url = build_index_url(source_url, page_number)
             while url:
                 if url in seen_urls:
                     logger.warning("stopping discovery because pager looped back to %s", url)
                     break
                 seen_urls.add(url)
 
-                logger.info("discovering UPC index page %s: %s", page_number, url)
+                logger.info("discovering UPC index requested_page=%s url=%s", page_number, url)
                 await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
                 await accept_cookies(page)
                 await settle_page(page, settings)
                 html, page_items = await parse_or_submit_index_page(page, settings, debug_dir, page_number)
+                actual_url = page.url
+                actual_page_number = parse_page_number(actual_url)
+                logger.info(
+                    "UPC index requested_page=%s actual_url=%s parsed_actual_page=%s",
+                    page_number,
+                    actual_url,
+                    actual_page_number,
+                )
 
-                if page_number == 0 and not page_items:
+                if page_number == settings.start_page and not page_items:
                     await save_debug(
                         debug_dir,
-                        f"index-page-0-no-results-{debug_name(source_url)}",
+                        f"index-page-{page_number}-no-results-{debug_name(source_url)}",
                         html,
                         page,
-                        "No decision rows were found in the first index page even after any available form submit.",
+                        "No decision rows were found in the first requested index page even after any available form submit.",
                     )
-                    raise ScraperError("no decision rows found on the first UPC index page")
+                    raise ScraperError("no decision rows found on the first requested UPC index page")
 
-                if page_number > 0 and not page_items:
+                if page_number > settings.start_page and not page_items:
                     await save_debug(
                         debug_dir,
                         f"index-page-{page_number}-empty",
@@ -283,26 +329,39 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 )
                 items.extend(page_items)
                 logger.info(
-                    "discovery progress: %s page(s), %s cumulative item(s)",
-                    page_number + 1,
+                    "discovery progress: requested_page=%s pages_scraped=%s cumulative_item_count=%s",
+                    page_number,
+                    page_number - settings.start_page + 1,
                     len(items),
                 )
                 if settings.max_items and len(items) >= settings.max_items:
                     logger.info("stopping discovery at MAX_ITEMS=%s", settings.max_items)
                     break
 
-                if settings.max_pages and page_number + 1 >= settings.max_pages:
+                pages_scraped = page_number - settings.start_page + 1
+                if settings.max_pages and pages_scraped >= settings.max_pages:
                     logger.info("stopping discovery at MAX_PAGES=%s", settings.max_pages)
                     break
 
-                next_url = extract_next_page_url(html, page.url)
+                raw_next_url = extract_next_page_url(html, actual_url)
+                next_url = select_next_index_url(source_url, page_number, actual_url, raw_next_url)
                 if not next_url:
                     logger.info("no next pager link found after index page %s", page_number)
                     break
+                next_page_number = parse_page_number(next_url)
+                logger.info(
+                    "UPC index next page selected: requested_page=%s parsed_next_page=%s next_url=%s",
+                    page_number,
+                    next_page_number,
+                    next_url,
+                )
 
-                previous_url = page.url
-                clicked = await click_next_pager(page, settings)
-                if clicked:
+                raw_next_absolute = urljoin(actual_url or source_url, raw_next_url)
+                should_click = raw_next_absolute == next_url
+                previous_url = actual_url
+                clicked = await click_next_pager(page, settings) if should_click else False
+                clicked_page_number = parse_page_number(page.url) if clicked else -1
+                if clicked and clicked_page_number > page_number:
                     page_number += 1
                     url = page.url
                     if url == previous_url:
@@ -311,10 +370,18 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                         # loop key while still parsing the clicked page next.
                         url = next_url
                     continue
+                if clicked:
+                    logger.warning(
+                        "clicked pager did not advance safely: requested_page=%s clicked_url=%s parsed_clicked_page=%s; using selected URL %s",
+                        page_number,
+                        page.url,
+                        clicked_page_number,
+                        next_url,
+                    )
 
-                logger.info("falling back to extracted next pager URL: %s", next_url)
+                logger.info("using selected next pager URL: %s", next_url)
                 url = next_url
-                page_number += 1
+                page_number = next_page_number if next_page_number > page_number else page_number + 1
 
             return cap_items(dedupe_items(items), settings)
         except Exception as exc:

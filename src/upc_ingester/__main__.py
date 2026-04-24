@@ -27,6 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
     backfill = subparsers.add_parser("backfill", help="run a deliberate broader one-off crawl for statistics/backfill")
     backfill.add_argument("--max-pages", type=int, default=0, help="maximum UPC index pages to inspect; 0 means unlimited")
     backfill.add_argument("--max-items", type=int, default=0, help="maximum UPC items to ingest; 0 means unlimited")
+    backfill.add_argument("--start-page", type=int, default=0, help="UPC index page number to start from; default 0")
     backfill.add_argument(
         "--write-all-json",
         action="store_true",
@@ -53,7 +54,7 @@ async def serve(settings: Settings) -> None:
         server.shutdown()
 
 
-def settings_for_backfill(base: Settings, max_pages: int, max_items: int, write_all_json: bool) -> Settings:
+def settings_for_backfill(base: Settings, max_pages: int, max_items: int, start_page: int, write_all_json: bool) -> Settings:
     return Settings(
         data_dir=base.data_dir,
         public_dir=base.public_dir,
@@ -71,6 +72,7 @@ def settings_for_backfill(base: Settings, max_pages: int, max_items: int, write_
         page_wait_timeout_ms=base.page_wait_timeout_ms,
         max_pages=max_pages,
         max_items=max_items,
+        start_page=start_page,
         latest_export_limit=max(base.latest_export_limit, min(max_items, 200)),
         write_all_json=write_all_json or base.write_all_json,
     )
@@ -99,12 +101,14 @@ async def main_async() -> int:
         # still read Settings.from_env indirectly.
         os.environ["MAX_PAGES"] = str(args.max_pages)
         os.environ["MAX_ITEMS"] = str(args.max_items)
+        os.environ["START_PAGE"] = str(args.start_page)
         if args.write_all_json:
             os.environ["WRITE_ALL_JSON"] = "true"
         backfill_settings = settings_for_backfill(
             settings,
             max_pages=args.max_pages,
             max_items=args.max_items,
+            start_page=args.start_page,
             write_all_json=args.write_all_json,
         )
         result = await run_ingestion(backfill_settings, bootstrap=False, index_only=args.index_only)

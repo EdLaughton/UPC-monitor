@@ -91,10 +91,22 @@ Example full catalogue index-only backfill:
 python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
 ```
 
+Resume from a later UPC index page:
+
+```bash
+python -m upc_ingester backfill --index-only --start-page 22 --max-pages 80 --max-items 2200
+```
+
 Docker example against the persistent `/data` volume:
 
 ```bash
 docker exec -it upc-monitor python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
+```
+
+Docker resume example:
+
+```bash
+docker exec -it upc-monitor python -m upc_ingester backfill --index-only --start-page 22 --max-pages 80 --max-items 2200
 ```
 
 For local development without installing the package:
@@ -124,6 +136,7 @@ Environment variables:
 - `FALLBACK_SOURCE_URL`: fallback official alias, default `https://www.unified-patent-court.org/en/decisions-and-orders`
 - `MAX_PAGES`: index page discovery cap, default `1` for gentle hourly polling; `backfill` is uncapped
 - `MAX_ITEMS`: item discovery cap, default `10` for gentle hourly polling; `backfill` is uncapped
+- `START_PAGE`: optional index page number to start from, default `0`; usually set via `backfill --start-page`
 
 ## Unraid Compose Alternative
 
@@ -151,7 +164,7 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 
 - The ingester uses Playwright Chromium for both page access and PDF downloads so cookies and headers match the browser session.
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
-- Use `python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later.
+- Use `python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. If pagination is interrupted, resume with `--start-page`, for example `--start-page 22`.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - PDF bytes are validated as PDFs and hashed with SHA-256 before an item is marked seen.
 

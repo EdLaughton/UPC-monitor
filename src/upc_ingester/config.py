@@ -78,6 +78,7 @@ class Settings:
     page_wait_timeout_ms: int
     max_pages: int
     max_items: int
+    start_page: int
     latest_export_limit: int
     write_all_json: bool
 
@@ -102,6 +103,7 @@ class Settings:
             page_wait_timeout_ms=env_int("PAGE_WAIT_TIMEOUT_MS", 20000),
             max_pages=env_int("MAX_PAGES", 1),
             max_items=env_int("MAX_ITEMS", 10),
+            start_page=env_int("START_PAGE", 0),
             latest_export_limit=env_int("LATEST_EXPORT_LIMIT", 50),
             write_all_json=env_bool("WRITE_ALL_JSON", False),
         )

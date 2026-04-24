@@ -2,13 +2,17 @@ import asyncio
 from dataclasses import replace
 from pathlib import Path
 
+from upc_ingester.__main__ import settings_for_backfill
 from upc_ingester.config import Settings
 from upc_ingester.db import Database, INDEX_ONLY_LAST_ERROR
 from upc_ingester.parser import IndexItem
 from upc_ingester.scraper import (
+    build_index_url,
     cap_items,
     ingest_discovered_items,
     needs_enrichment,
+    parse_page_number,
+    select_next_index_url,
     upsert_index_only_item,
 )
 
@@ -63,6 +67,7 @@ def make_settings(tmp_path: Path) -> Settings:
         page_wait_timeout_ms=1000,
         max_pages=1,
         max_items=10,
+        start_page=0,
         latest_export_limit=50,
         write_all_json=False,
     )
@@ -267,3 +272,51 @@ def test_discovery_max_items_cap_keeps_latest_items(tmp_path: Path) -> None:
     items = [make_index_item(), make_updated_index_item()]
 
     assert cap_items(items, settings) == items[:1]
+
+
+def test_build_index_url_preserves_filter_query_and_sets_page() -> None:
+    url = (
+        "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
+        "?case_number_search=&registry_number=&judgement_type=All&division_1=125&page=3"
+    )
+
+    built = build_index_url(url, 22)
+
+    assert built == (
+        "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
+        "?case_number_search=&registry_number=&judgement_type=All&division_1=125&page=22"
+    )
+    assert parse_page_number(built) == 22
+
+
+def test_later_unsubmitted_form_reset_uses_direct_next_page_url() -> None:
+    source_url = (
+        "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
+        "?case_number_search=&registry_number=&judgement_type=All&division_1=125"
+    )
+    actual_url_after_apply = build_index_url(source_url, 0)
+    reset_next_url = build_index_url(source_url, 1)
+
+    selected = select_next_index_url(
+        source_url=source_url,
+        requested_page_number=21,
+        actual_url=actual_url_after_apply,
+        next_url=reset_next_url,
+    )
+
+    assert selected == build_index_url(source_url, 22)
+    assert parse_page_number(selected) == 22
+
+
+def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
+    settings = settings_for_backfill(
+        make_settings(tmp_path),
+        max_pages=80,
+        max_items=2200,
+        start_page=22,
+        write_all_json=False,
+    )
+
+    assert settings.start_page == 22
+    assert settings.max_pages == 80
+    assert settings.max_items == 2200
