@@ -1,7 +1,9 @@
 import asyncio
 import re
+from datetime import date
 from dataclasses import replace
 from pathlib import Path
+from urllib.parse import parse_qsl, urlparse
 
 from upc_ingester.__main__ import settings_for_backfill
 from upc_ingester.config import Settings
@@ -9,7 +11,9 @@ from upc_ingester.db import Database, INDEX_ONLY_LAST_ERROR
 from upc_ingester.parser import IndexItem
 from upc_ingester.scraper import (
     build_index_url,
+    build_date_index_url,
     cap_items,
+    date_windows,
     discover_items,
     ingest_discovered_items,
     needs_enrichment,
@@ -98,23 +102,30 @@ class FakeLocator:
 
 
 class FakePage:
-    def __init__(self, pages: dict[int, str], base_url: str = "https://example.test/index?filter=1"):
+    def __init__(self, pages: dict, base_url: str = "https://example.test/index?filter=1"):
         self.pages = pages
         self.base_url = base_url
         self.current_page = 0
+        self.current_window: tuple[str, str] | None = None
         self.url = build_index_url(base_url, 0)
 
     @property
     def next_page(self) -> int | None:
-        html = self.pages.get(self.current_page, "")
+        html = self.pages.get(self.current_window, "") if self.current_window is not None else self.pages.get(self.current_page, "")
         match = re.search(r'href="\?page=(\d+)"', html)
         return int(match.group(1)) if match else None
 
     async def goto(self, url: str, wait_until: str = "", timeout: int = 0) -> None:
         self.url = url
         self.current_page = parse_page_number(url)
+        from_query = dict(parse_qsl(urlparse(url).query, keep_blank_values=True))
+        start = from_query.get("judgement_date_from[date]", "")
+        end = from_query.get("judgement_date_to[date]", "")
+        self.current_window = (start, end) if start or end else None
 
     async def content(self) -> str:
+        if self.current_window is not None:
+            return self.pages.get(self.current_window, "")
         return self.pages.get(self.current_page, "")
 
     def locator(self, selector: str) -> FakeLocator:
@@ -134,7 +145,7 @@ class FakePage:
 
 
 class FakeContext:
-    def __init__(self, pages: dict[int, str]):
+    def __init__(self, pages: dict):
         self.pages = pages
 
     async def new_page(self) -> FakePage:
@@ -192,6 +203,9 @@ def make_settings(tmp_path: Path) -> Settings:
         max_pages=1,
         max_items=10,
         start_page=0,
+        date_from="",
+        date_to="",
+        date_window_days=0,
         latest_export_limit=50,
         write_all_json=False,
     )
@@ -413,6 +427,28 @@ def test_build_index_url_preserves_filter_query_and_sets_page() -> None:
     assert parse_page_number(built) == 22
 
 
+def test_build_date_index_url_preserves_query_and_sets_date_window() -> None:
+    url = (
+        "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
+        "?case_number_search=&registry_number=&judgement_type=All&division_1=125&page=3"
+    )
+
+    built = build_date_index_url(url, date(2026, 4, 1), date(2026, 4, 7))
+
+    assert "page=" not in built
+    assert "case_number_search=" in built
+    assert "judgement_date_from%5Bdate%5D=2026-04-01" in built
+    assert "judgement_date_to%5Bdate%5D=2026-04-07" in built
+
+
+def test_date_windows_chunk_range() -> None:
+    assert date_windows(date(2026, 4, 1), date(2026, 4, 10), 4) == [
+        (date(2026, 4, 1), date(2026, 4, 4)),
+        (date(2026, 4, 5), date(2026, 4, 8)),
+        (date(2026, 4, 9), date(2026, 4, 10)),
+    ]
+
+
 def test_backward_pager_selects_deterministic_next_page_url() -> None:
     source_url = (
         "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
@@ -438,12 +474,18 @@ def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
         max_pages=80,
         max_items=2200,
         start_page=22,
+        date_from="2024-01-01",
+        date_to="2026-04-24",
+        date_window_days=7,
         write_all_json=False,
     )
 
     assert settings.start_page == 22
     assert settings.max_pages == 80
     assert settings.max_items == 2200
+    assert settings.date_from == "2024-01-01"
+    assert settings.date_to == "2026-04-24"
+    assert settings.date_window_days == 7
 
 
 def test_start_page_walk_skips_earlier_pages_and_collects_requested_page(tmp_path: Path) -> None:
@@ -498,3 +540,44 @@ def test_duplicate_page_zero_while_walking_to_start_fails_clearly(tmp_path: Path
         assert "could not reach start page 2" in str(exc)
     else:
         raise AssertionError("duplicate page while walking to start should fail clearly")
+
+
+def test_date_window_discovery_collects_shallow_windows(tmp_path: Path) -> None:
+    pages = {
+        ("2026-04-01", "2026-04-07"): index_html(1, "node-101"),
+        ("2026-04-08", "2026-04-14"): index_html(2, "node-102"),
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        date_from="2026-04-01",
+        date_to="2026-04-14",
+        date_window_days=7,
+        max_pages=0,
+        max_items=0,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-101", "node-102"]
+
+
+def test_date_window_discovery_splits_truncated_window_without_counting_parent(tmp_path: Path) -> None:
+    pages = {
+        ("2026-04-01", "2026-04-02"): index_html(0, "node-100", next_page=1),
+        ("2026-04-01", "2026-04-01"): index_html(1, "node-101"),
+        ("2026-04-02", "2026-04-02"): index_html(2, "node-102"),
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        date_from="2026-04-01",
+        date_to="2026-04-02",
+        date_window_days=2,
+        max_pages=0,
+        max_items=0,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-101", "node-102"]

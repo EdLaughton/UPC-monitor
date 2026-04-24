@@ -79,6 +79,9 @@ class Settings:
     max_pages: int
     max_items: int
     start_page: int
+    date_from: str
+    date_to: str
+    date_window_days: int
     latest_export_limit: int
     write_all_json: bool
 
@@ -104,6 +107,9 @@ class Settings:
             max_pages=env_int("MAX_PAGES", 1),
             max_items=env_int("MAX_ITEMS", 10),
             start_page=env_int("START_PAGE", 0),
+            date_from=os.getenv("DATE_FROM", ""),
+            date_to=os.getenv("DATE_TO", ""),
+            date_window_days=env_int("DATE_WINDOW_DAYS", 0),
             latest_export_limit=env_int("LATEST_EXPORT_LIMIT", 50),
             write_all_json=env_bool("WRITE_ALL_JSON", False),
         )

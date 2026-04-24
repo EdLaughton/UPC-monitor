@@ -28,6 +28,14 @@ def build_parser() -> argparse.ArgumentParser:
     backfill.add_argument("--max-pages", type=int, default=0, help="maximum UPC index pages to inspect; 0 means unlimited")
     backfill.add_argument("--max-items", type=int, default=0, help="maximum UPC items to ingest; 0 means unlimited")
     backfill.add_argument("--start-page", type=int, default=0, help="UPC index page number to start from; default 0")
+    backfill.add_argument("--date-from", default="", help="oldest decision date to include, YYYY-MM-DD")
+    backfill.add_argument("--date-to", default="", help="newest decision date to include, YYYY-MM-DD; default today in UTC")
+    backfill.add_argument(
+        "--date-window-days",
+        type=int,
+        default=0,
+        help="split index discovery into shallow date windows; 0 disables date-window mode",
+    )
     backfill.add_argument(
         "--write-all-json",
         action="store_true",
@@ -54,7 +62,16 @@ async def serve(settings: Settings) -> None:
         server.shutdown()
 
 
-def settings_for_backfill(base: Settings, max_pages: int, max_items: int, start_page: int, write_all_json: bool) -> Settings:
+def settings_for_backfill(
+    base: Settings,
+    max_pages: int,
+    max_items: int,
+    start_page: int,
+    date_from: str,
+    date_to: str,
+    date_window_days: int,
+    write_all_json: bool,
+) -> Settings:
     return Settings(
         data_dir=base.data_dir,
         public_dir=base.public_dir,
@@ -73,6 +90,9 @@ def settings_for_backfill(base: Settings, max_pages: int, max_items: int, start_
         max_pages=max_pages,
         max_items=max_items,
         start_page=start_page,
+        date_from=date_from,
+        date_to=date_to,
+        date_window_days=date_window_days,
         latest_export_limit=max(base.latest_export_limit, min(max_items, 200)),
         write_all_json=write_all_json or base.write_all_json,
     )
@@ -102,6 +122,9 @@ async def main_async() -> int:
         os.environ["MAX_PAGES"] = str(args.max_pages)
         os.environ["MAX_ITEMS"] = str(args.max_items)
         os.environ["START_PAGE"] = str(args.start_page)
+        os.environ["DATE_FROM"] = args.date_from
+        os.environ["DATE_TO"] = args.date_to
+        os.environ["DATE_WINDOW_DAYS"] = str(args.date_window_days)
         if args.write_all_json:
             os.environ["WRITE_ALL_JSON"] = "true"
         backfill_settings = settings_for_backfill(
@@ -109,6 +132,9 @@ async def main_async() -> int:
             max_pages=args.max_pages,
             max_items=args.max_items,
             start_page=args.start_page,
+            date_from=args.date_from,
+            date_to=args.date_to,
+            date_window_days=args.date_window_days,
             write_all_json=args.write_all_json,
         )
         result = await run_ingestion(backfill_settings, bootstrap=False, index_only=args.index_only)

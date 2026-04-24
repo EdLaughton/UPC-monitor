@@ -4,7 +4,7 @@ import asyncio
 import json
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
@@ -58,6 +58,15 @@ def build_index_url(base_url: str, page_number: int) -> str:
     return urlunparse(parsed._replace(query=urlencode(query), fragment=""))
 
 
+def build_date_index_url(base_url: str, start: date, end: date) -> str:
+    parsed = urlparse(base_url)
+    query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    query.pop("page", None)
+    query["judgement_date_from[date]"] = start.isoformat()
+    query["judgement_date_to[date]"] = end.isoformat()
+    return urlunparse(parsed._replace(query=urlencode(query), fragment=""))
+
+
 def parse_page_number(url: str) -> int:
     parsed = urlparse(url)
     query = dict(parse_qsl(parsed.query, keep_blank_values=True))
@@ -88,6 +97,39 @@ def select_next_index_url(source_url: str, requested_page_number: int, actual_ur
 
 def item_signature(items: list[IndexItem]) -> tuple[str, ...]:
     return tuple(item.item_key for item in items)
+
+
+def parse_result_total(html: str) -> int | None:
+    match = re.search(r"Displaying\s+\d+\s*-\s*\d+\s+of\s+(\d+)", html, flags=re.I)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def split_date_range(start: date, end: date) -> tuple[tuple[date, date], tuple[date, date]]:
+    days = (end - start).days
+    midpoint = start + timedelta(days=days // 2)
+    return (start, midpoint), (midpoint + timedelta(days=1), end)
+
+
+def configured_date_range(settings: Settings) -> tuple[date, date]:
+    start = date.fromisoformat(settings.date_from or "2024-01-01")
+    end = date.fromisoformat(settings.date_to) if settings.date_to else datetime.now(timezone.utc).date()
+    if end < start:
+        raise ScraperError(f"DATE_TO {end.isoformat()} is before DATE_FROM {start.isoformat()}")
+    return start, end
+
+
+def date_windows(start: date, end: date, days: int) -> list[tuple[date, date]]:
+    if days < 1:
+        raise ScraperError("DATE_WINDOW_DAYS must be at least 1 when date-window discovery is enabled")
+    windows: list[tuple[date, date]] = []
+    cursor = start
+    while cursor <= end:
+        window_end = min(end, cursor + timedelta(days=days - 1))
+        windows.append((cursor, window_end))
+        cursor = window_end + timedelta(days=1)
+    return windows
 
 
 def discovery_sources(settings: Settings) -> list[str]:
@@ -268,7 +310,112 @@ async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, 
     return html, page_items, True
 
 
+async def discover_date_window_items_for_source(page, settings: Settings, debug_dir: Path, source_url: str) -> list[IndexItem]:
+    start, end = configured_date_range(settings)
+    stack = list(reversed(date_windows(start, end, settings.date_window_days)))
+    items: list[IndexItem] = []
+    windows_collected = 0
+    windows_seen: set[tuple[date, date]] = set()
+
+    logger.info(
+        "starting UPC date-window discovery from %s to %s with DATE_WINDOW_DAYS=%s",
+        start.isoformat(),
+        end.isoformat(),
+        settings.date_window_days,
+    )
+
+    while stack:
+        window_start, window_end = stack.pop()
+        if (window_start, window_end) in windows_seen:
+            logger.warning("skipping duplicate date window %s..%s", window_start, window_end)
+            continue
+        windows_seen.add((window_start, window_end))
+
+        url = build_date_index_url(source_url, window_start, window_end)
+        logger.info("discovering UPC date window %s..%s: %s", window_start, window_end, url)
+        await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+        await accept_cookies(page)
+        await settle_page(page, settings)
+        html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, 0)
+        actual_url = page.url
+        total = parse_result_total(html)
+        has_next_page = bool(extract_next_page_url(html, actual_url))
+        days = (window_end - window_start).days + 1
+
+        logger.info(
+            "UPC date window %s..%s actual_url=%s items=%s total=%s has_next=%s submitted_form=%s",
+            window_start,
+            window_end,
+            actual_url,
+            len(page_items),
+            total if total is not None else "unknown",
+            has_next_page,
+            submitted_form,
+        )
+
+        is_truncated = has_next_page or (total is not None and total > len(page_items))
+        if is_truncated and window_start < window_end:
+            earlier, later = split_date_range(window_start, window_end)
+            logger.info(
+                "splitting UPC date window %s..%s because it appears truncated; next windows %s..%s and %s..%s",
+                window_start,
+                window_end,
+                earlier[0],
+                earlier[1],
+                later[0],
+                later[1],
+            )
+            stack.append(later)
+            stack.append(earlier)
+            continue
+
+        if is_truncated and window_start < window_end:
+            logger.warning(
+                "UPC date window %s..%s still appears truncated at configured window size; storing first page only",
+                window_start,
+                window_end,
+            )
+        elif is_truncated:
+            logger.warning(
+                "UPC single-day date window %s has more than one page; storing first page only",
+                window_start,
+            )
+
+        items.extend(page_items)
+        windows_collected += 1
+        logger.info(
+            "date-window discovery progress: windows_collected=%s cumulative_item_count=%s",
+            windows_collected,
+            len(items),
+        )
+        if settings.max_items and len(items) >= settings.max_items:
+            logger.info("stopping date-window discovery at MAX_ITEMS=%s", settings.max_items)
+            break
+        if settings.max_pages and windows_collected >= settings.max_pages:
+            logger.info("stopping date-window discovery at MAX_PAGES=%s collected window(s)", settings.max_pages)
+            break
+
+    return cap_items(dedupe_items(items), settings)
+
+
+async def discover_date_window_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
+    last_error: Exception | None = None
+    for source_url in discovery_sources(settings):
+        page = await context.new_page()
+        try:
+            return await discover_date_window_items_for_source(page, settings, debug_dir, source_url)
+        except Exception as exc:
+            last_error = exc
+            logger.warning("date-window discovery failed for %s: %s", source_url, exc)
+        finally:
+            await page.close()
+    raise ScraperError(f"UPC date-window discovery failed for all source URLs: {last_error}")
+
+
 async def discover_items(context, settings: Settings, debug_dir: Path) -> list[IndexItem]:
+    if settings.date_window_days:
+        return await discover_date_window_items(context, settings, debug_dir)
+
     sources = discovery_sources(settings)
 
     last_error: Exception | None = None

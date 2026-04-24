@@ -95,27 +95,29 @@ python -m upc_ingester bootstrap
 Example full catalogue index-only backfill:
 
 ```bash
-python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
+python -m upc_ingester backfill --index-only --date-from 2024-01-01 --date-window-days 7 --max-items 2200
 ```
 
-Resume from a later UPC index page:
+Date-window mode is preferred for historical catalogue backfill because it avoids deep pagination. It requests shallow UPC index ranges by decision date and recursively splits a range if the first page still has pagination.
+
+Resume from a later date:
 
 ```bash
-python -m upc_ingester backfill --index-only --start-page 22 --max-pages 80 --max-items 2200
+python -m upc_ingester backfill --index-only --date-from 2025-01-01 --date-to 2025-12-31 --date-window-days 7 --max-items 2200
 ```
 
-When `--start-page` is greater than `0`, the scraper walks from page 0 by clicking the rendered UPC next-pager links and skips earlier pages until the requested start page is reached. This avoids trusting direct `page=N` loads when the UPC form resets to the first page.
+`--start-page` remains available for diagnostics, but it is not recommended for large historical backfills because walking rendered pager links can trigger Cloudflare challenges.
 
 Docker example against the persistent `/data` volume:
 
 ```bash
-docker exec -it upc-monitor python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200
+docker exec -it upc-monitor python -m upc_ingester backfill --index-only --date-from 2024-01-01 --date-window-days 7 --max-items 2200
 ```
 
-Docker resume example:
+Docker date-range resume example:
 
 ```bash
-docker exec -it upc-monitor python -m upc_ingester backfill --index-only --start-page 22 --max-pages 80 --max-items 2200
+docker exec -it upc-monitor python -m upc_ingester backfill --index-only --date-from 2025-01-01 --date-to 2025-12-31 --date-window-days 7 --max-items 2200
 ```
 
 For local development without installing the package:
@@ -146,6 +148,9 @@ Environment variables:
 - `MAX_PAGES`: index page discovery cap, default `1` for gentle hourly polling; `backfill` is uncapped
 - `MAX_ITEMS`: item discovery cap, default `10` for gentle hourly polling; `backfill` is uncapped
 - `START_PAGE`: optional index page number to start from, default `0`; usually set via `backfill --start-page`
+- `DATE_FROM`: optional oldest decision date for date-window backfill, default `2024-01-01` when date-window mode is enabled
+- `DATE_TO`: optional newest decision date for date-window backfill, default today when date-window mode is enabled
+- `DATE_WINDOW_DAYS`: date-window size for shallow historical discovery, default `0` disabled; usually set via `backfill --date-window-days`
 
 ## Unraid Compose Alternative
 
@@ -178,7 +183,7 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 
 - The ingester uses Playwright Chromium for both page access and PDF downloads so cookies and headers match the browser session.
 - The index table is used for discovery; UPC detail pages are the primary source for rich metadata such as headnotes, keywords, panel, language, and official PDF links.
-- Use `python -m upc_ingester backfill --index-only --max-pages 80 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. If pagination is interrupted, resume with `--start-page`, for example `--start-page 22`; resume walks through the rendered pager session and skips earlier pages rather than relying on a direct page jump.
+- Use `python -m upc_ingester backfill --index-only --date-from 2024-01-01 --date-window-days 7 --max-items 2200` when Cloudflare challenges make historical detail-page enrichment impractical. This stores index metadata only, deliberately avoids detail-page and PDF network requests, and is intended to be followed by slower detail/PDF enrichment later. Date-window mode is preferred over `--start-page` for large historical runs.
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - `/stats.html` and `/stats.json` are generated from already-ingested SQLite records only. The statistics are descriptive and separate UPC decision/order statistics from scraper/data-quality health.
 - `/status.json` is operational run status. `/all.ndjson` is a full machine-readable export, while `/latest.json` is capped by `LATEST_EXPORT_LIMIT`.
