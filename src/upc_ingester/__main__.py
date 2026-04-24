@@ -37,6 +37,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="split index discovery into shallow date windows; 0 disables date-window mode",
     )
     backfill.add_argument(
+        "--index-page-retry-delay-seconds",
+        type=int,
+        default=30,
+        help="seconds to wait before retrying a transient UPC index-page failure/challenge",
+    )
+    backfill.add_argument(
+        "--index-page-max-retries",
+        type=int,
+        default=3,
+        help="maximum retries for the same UPC index page before returning partial results",
+    )
+    backfill.add_argument(
         "--write-all-json",
         action="store_true",
         help="also write /all.json; /all.ndjson is always written",
@@ -70,6 +82,8 @@ def settings_for_backfill(
     date_from: str,
     date_to: str,
     date_window_days: int,
+    index_page_retry_delay_seconds: int,
+    index_page_max_retries: int,
     write_all_json: bool,
 ) -> Settings:
     return Settings(
@@ -93,6 +107,8 @@ def settings_for_backfill(
         date_from=date_from,
         date_to=date_to,
         date_window_days=date_window_days,
+        index_page_retry_delay_seconds=index_page_retry_delay_seconds,
+        index_page_max_retries=index_page_max_retries,
         latest_export_limit=max(base.latest_export_limit, min(max_items, 200)),
         write_all_json=write_all_json or base.write_all_json,
     )
@@ -125,6 +141,8 @@ async def main_async() -> int:
         os.environ["DATE_FROM"] = args.date_from
         os.environ["DATE_TO"] = args.date_to
         os.environ["DATE_WINDOW_DAYS"] = str(args.date_window_days)
+        os.environ["INDEX_PAGE_RETRY_DELAY_SECONDS"] = str(args.index_page_retry_delay_seconds)
+        os.environ["INDEX_PAGE_MAX_RETRIES"] = str(args.index_page_max_retries)
         if args.write_all_json:
             os.environ["WRITE_ALL_JSON"] = "true"
         backfill_settings = settings_for_backfill(
@@ -135,6 +153,8 @@ async def main_async() -> int:
             date_from=args.date_from,
             date_to=args.date_to,
             date_window_days=args.date_window_days,
+            index_page_retry_delay_seconds=args.index_page_retry_delay_seconds,
+            index_page_max_retries=args.index_page_max_retries,
             write_all_json=args.write_all_json,
         )
         result = await run_ingestion(backfill_settings, bootstrap=False, index_only=args.index_only)
