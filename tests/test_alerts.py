@@ -7,8 +7,15 @@ import pytest
 from upc_ingester.alerts import (
     MATCH_FIELDS,
     WatchProfile,
+    _extract_pdf_text_if_available,
+    _find_record_by_field,
     _match_sync_filter,
+    _match_create_fields,
     _match_update_fields,
+    _quote_airtable_formula_value,
+    normalise_document_type,
+    normalise_language,
+    sync_matches_to_airtable,
     _upc_item_create_fields,
     _upc_item_update_fields,
     build_sync_key,
@@ -142,7 +149,9 @@ def test_airtable_payload_rules() -> None:
 
     profile = WatchProfile("recA", "Legal", "Legal", [], [], ["injunction"], [])
     match = match_alerts([d], [profile])[0]
+    match_create = _match_create_fields(match, "recItem")
     match_update = _match_update_fields(match, "recItem")
+    assert MATCH_FIELDS["match_id"] not in match_create
     assert MATCH_FIELDS["reviewer_decision"] not in match_update
     assert MATCH_FIELDS["ai_draft"] not in match_update
     assert MATCH_FIELDS["human_edited_draft"] not in match_update
@@ -208,3 +217,96 @@ def test_scheduler_alert_failure_isolated(tmp_path: Path, monkeypatch: pytest.Mo
         await scheduler._run_alerts_once_locked()
 
     asyncio.run(run_test())
+
+
+def test_formula_lookup_uses_valid_field_name(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    seen_params: dict = {}
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        seen_params.update(params or {})
+        return {"records": []}
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    _find_record_by_field("appBase", "tblTable", "Item key", "O'Reilly", "tok")
+    assert seen_params["filterByFormula"] == r"{Item key}='O\'Reilly'"
+
+
+def test_select_normalisation_helpers() -> None:
+    assert normalise_document_type("Order of the Court") == "Order"
+    assert normalise_document_type("Strange label") == "Other"
+    assert normalise_language("ENGLISH") == "English"
+    assert normalise_language("Spanish") == "Other"
+    assert normalise_language("") == "Unknown"
+
+
+def test_extract_pdf_text_empty_path_safe() -> None:
+    assert _extract_pdf_text_if_available({"documents": [{"file_path": ""}, {"file_path": None}]}) == ""
+
+
+def test_repeated_sync_updates_not_duplicates(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    settings = make_settings(tmp_path)
+    profile = WatchProfile("recA", "Legal", "Legal", [], [], ["injunction"], [])
+    match = match_alerts([sample_decision()], [profile])[0]
+    state = {"items": {}, "matches": {}, "next": 1}
+
+    def rec_id() -> str:
+        value = f"rec{state['next']}"
+        state["next"] += 1
+        return value
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        if method == "GET" and params and "filterByFormula" in params:
+            formula = params["filterByFormula"]
+            if formula.startswith("{Item key}="):
+                key = formula.split("=", 1)[1].strip("'").replace("\\'", "'")
+                row = state["items"].get(key)
+                return {"records": ([{"id": row["id"], "fields": row["fields"]}] if row else [])}
+            if formula.startswith("{Sync key}="):
+                key = formula.split("=", 1)[1].strip("'").replace("\\'", "'")
+                row = state["matches"].get(key)
+                return {"records": ([{"id": row["id"], "fields": row["fields"]}] if row else [])}
+            return {"records": []}
+        if method == "GET":
+            return {"records": []}
+        if url.endswith(a.UPC_ITEMS_TABLE_ID):
+            fields = payload["fields"]
+            key = fields[a.UPC_ITEM_FIELDS["item_key"]]
+            row = {"id": rec_id(), "fields": fields}
+            state["items"][key] = row
+            return row
+        if a.UPC_ITEMS_TABLE_ID in url and method == "PATCH":
+            rid = url.rstrip("/").split("/")[-1]
+            for row in state["items"].values():
+                if row["id"] == rid:
+                    row["fields"].update(payload["fields"])
+                    return row
+        if url.endswith(a.MATCHES_TABLE_ID):
+            fields = payload["fields"]
+            key = fields[a.MATCH_FIELDS["sync_key"]]
+            row = {"id": rec_id(), "fields": fields}
+            state["matches"][key] = row
+            return row
+        if a.MATCHES_TABLE_ID in url and method == "PATCH":
+            rid = url.rstrip("/").split("/")[-1]
+            for row in state["matches"].values():
+                if row["id"] == rid:
+                    row["fields"].update(payload["fields"])
+                    return row
+        return {"records": []}
+
+    monkeypatch.setattr(a, "_airtable_token", lambda: "token")
+    monkeypatch.setattr(a, "_record_count_hint", lambda base_id, token: 10)
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+
+    first = sync_matches_to_airtable(settings, [match], include_low_confidence=False, max_sync_records=10, dry_run=False)
+    second = sync_matches_to_airtable(settings, [match], include_low_confidence=False, max_sync_records=10, dry_run=False)
+    assert first["created_items"] == 1
+    assert first["created_matches"] == 1
+    assert second["updated_items"] == 1
+    assert second["updated_matches"] == 1
+    assert len(state["items"]) == 1
+    assert len(state["matches"]) == 1

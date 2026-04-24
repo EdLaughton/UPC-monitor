@@ -21,6 +21,8 @@ AIRTABLE_API_URL = "https://api.airtable.com/v0"
 UPC_ITEMS_TABLE_ID = "tblXzaunrmB52AYAn"
 WATCH_PROFILES_TABLE_ID = "tblj5iRsGKHucmaVe"
 MATCHES_TABLE_ID = "tbluFfUUnYeI1GfmP"
+UPC_ITEM_KEY_FIELD_NAME = "Item key"
+MATCH_SYNC_KEY_FIELD_NAME = "Sync key"
 
 UPC_ITEM_FIELDS = {"item_key": "fld7QIzJJn2TkdT0G", "decision_date": "fldHpBLNBbxlRrHr4", "first_seen_at": "fldy19CTje2vDn0uA", "case_number": "fldh0LqWPZA3udV8d", "registry_number": "fldmdRNrXoPtsFztV", "division": "fldbjL3hih0KbAJmM", "document_type": "fldUiEsARsQdyxK8l", "type_of_action": "fldYkaJlCPv49SX6q", "language": "fldCbQdvS6wsYZdBD", "parties_raw": "fldAtKQaJYOwZYYbV", "party_names": "fldRijRgrk4tNto75", "headnote": "fldoXWqS9FHIHuKMf", "keywords": "fldFDCoYsMZKlz01O", "mirror_url": "fldTWvWTAfzkAFXpT", "official_pdf_url": "fldHwpA6oVwT883ck", "pdf_text_available": "fldMMknYefGqluoJl", "status": "fldGi0z9O0nMSsrxb", "notes": "fldzFvx7X39KtolyE"}
 WATCH_PROFILE_FIELDS = {"profile_name": "fldHcGbPUISXVG30k", "alert_type": "fldIJvi2gwGWGOeDI", "parties_to_watch": "fldV8ZBIfHjNxN5ya", "sector_terms": "fldw0gyEpkhShsr9c", "legal_terms": "fldjOSms0Gxvethnn", "competitors": "fldu3IKj4RKCVwHsJ", "active": "fldokHp9rr98TxLuX"}
@@ -100,12 +102,18 @@ def _parse_simple_yaml_profiles(raw: str) -> list[dict[str, Any]]:
 
 def _extract_pdf_text_if_available(decision: dict[str, Any]) -> str:
     for doc in decision.get("documents", []):
-        fp = Path(str(doc.get("file_path") or ""))
-        if not fp:
+        raw_path = str(doc.get("file_path") or "").strip()
+        if not raw_path or raw_path in {".", "/"}:
             continue
-        txt = fp.with_suffix(".txt")
-        if txt.exists():
-            return normalize_text(txt.read_text(encoding="utf-8", errors="ignore"))
+        try:
+            txt = Path(raw_path).with_suffix(".txt")
+        except (ValueError, OSError):
+            continue
+        try:
+            if txt.exists():
+                return normalize_text(txt.read_text(encoding="utf-8", errors="ignore"))
+        except OSError:
+            continue
     return ""
 
 
@@ -252,8 +260,57 @@ def _record_count_hint(base_id: str, token: str) -> int | None:
     return total
 
 
+
+
+def normalise_document_type(value: str) -> str:
+    text = normalize_text(value)
+    if "final decision" in text:
+        return "Final Decision"
+    if "judgment" in text or "judgement" in text:
+        return "Judgment"
+    if "decision" in text:
+        return "Decision"
+    if "order" in text:
+        return "Order"
+    return "Other"
+
+
+def normalise_language(value: str) -> str:
+    text = normalize_text(value)
+    if not text:
+        return "Unknown"
+    mapping = {
+        "english": "English",
+        "german": "German",
+        "french": "French",
+        "italian": "Italian",
+        "dutch": "Dutch",
+    }
+    for key, label in mapping.items():
+        if key in text:
+            return label
+    return "Other"
+
 def _upc_item_create_fields(decision: dict[str, Any]) -> dict[str, Any]:
-    return {UPC_ITEM_FIELDS["item_key"]: decision.get("item_key", ""), UPC_ITEM_FIELDS["decision_date"]: decision.get("decision_date", ""), UPC_ITEM_FIELDS["first_seen_at"]: decision.get("first_seen_at", ""), UPC_ITEM_FIELDS["case_number"]: decision.get("case_number", ""), UPC_ITEM_FIELDS["registry_number"]: decision.get("registry_number", ""), UPC_ITEM_FIELDS["division"]: decision.get("division", ""), UPC_ITEM_FIELDS["document_type"]: decision.get("document_type", ""), UPC_ITEM_FIELDS["type_of_action"]: decision.get("type_of_action", ""), UPC_ITEM_FIELDS["language"]: decision.get("language", ""), UPC_ITEM_FIELDS["parties_raw"]: decision.get("parties_raw", ""), UPC_ITEM_FIELDS["party_names"]: ", ".join(decision.get("party_names_all", []) or []), UPC_ITEM_FIELDS["headnote"]: decision.get("headnote_text", ""), UPC_ITEM_FIELDS["keywords"]: decision.get("keywords_raw", ""), UPC_ITEM_FIELDS["mirror_url"]: decision.get("pdf_url_mirror", ""), UPC_ITEM_FIELDS["official_pdf_url"]: decision.get("pdf_url_official", ""), UPC_ITEM_FIELDS["pdf_text_available"]: bool(_extract_pdf_text_if_available(decision)), UPC_ITEM_FIELDS["status"]: "New"}
+    return {
+        UPC_ITEM_FIELDS["item_key"]: decision.get("item_key", ""),
+        UPC_ITEM_FIELDS["decision_date"]: decision.get("decision_date", ""),
+        UPC_ITEM_FIELDS["first_seen_at"]: decision.get("first_seen_at", ""),
+        UPC_ITEM_FIELDS["case_number"]: decision.get("case_number", ""),
+        UPC_ITEM_FIELDS["registry_number"]: decision.get("registry_number", ""),
+        UPC_ITEM_FIELDS["division"]: decision.get("division", ""),
+        UPC_ITEM_FIELDS["document_type"]: normalise_document_type(str(decision.get("document_type", ""))),
+        UPC_ITEM_FIELDS["type_of_action"]: decision.get("type_of_action", ""),
+        UPC_ITEM_FIELDS["language"]: normalise_language(str(decision.get("language", ""))),
+        UPC_ITEM_FIELDS["parties_raw"]: decision.get("parties_raw", ""),
+        UPC_ITEM_FIELDS["party_names"]: ", ".join(decision.get("party_names_all", []) or []),
+        UPC_ITEM_FIELDS["headnote"]: decision.get("headnote_text", ""),
+        UPC_ITEM_FIELDS["keywords"]: decision.get("keywords_raw", ""),
+        UPC_ITEM_FIELDS["mirror_url"]: decision.get("pdf_url_mirror", ""),
+        UPC_ITEM_FIELDS["official_pdf_url"]: decision.get("pdf_url_official", ""),
+        UPC_ITEM_FIELDS["pdf_text_available"]: bool(_extract_pdf_text_if_available(decision)),
+        UPC_ITEM_FIELDS["status"]: "New",
+    }
 
 
 def _upc_item_update_fields(decision: dict[str, Any]) -> dict[str, Any]:
@@ -264,7 +321,18 @@ def _upc_item_update_fields(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _match_create_fields(match: MatchResult, upc_item_record_id: str) -> dict[str, Any]:
-    return {MATCH_FIELDS["match_id"]: match.sync_key, MATCH_FIELDS["upc_item"]: [upc_item_record_id], MATCH_FIELDS["watch_profile"]: [match.profile_id] if match.profile_id else [], MATCH_FIELDS["confidence"]: match.confidence, MATCH_FIELDS["matched_fields"]: ", ".join(match.matched_fields), MATCH_FIELDS["matched_terms"]: ", ".join(match.matched_terms), MATCH_FIELDS["private_reason"]: match.private_reason, MATCH_FIELDS["public_reason"]: match.public_reason, MATCH_FIELDS["recommended_action"]: match.recommended_action, MATCH_FIELDS["reviewer_decision"]: "Pending", MATCH_FIELDS["sync_key"]: match.sync_key}
+    return {
+        MATCH_FIELDS["upc_item"]: [upc_item_record_id],
+        MATCH_FIELDS["watch_profile"]: [match.profile_id] if match.profile_id.startswith("rec") else [],
+        MATCH_FIELDS["confidence"]: match.confidence,
+        MATCH_FIELDS["matched_fields"]: ", ".join(match.matched_fields),
+        MATCH_FIELDS["matched_terms"]: ", ".join(match.matched_terms),
+        MATCH_FIELDS["private_reason"]: match.private_reason,
+        MATCH_FIELDS["public_reason"]: match.public_reason,
+        MATCH_FIELDS["recommended_action"]: match.recommended_action,
+        MATCH_FIELDS["reviewer_decision"]: "Pending",
+        MATCH_FIELDS["sync_key"]: match.sync_key,
+    }
 
 
 def _match_update_fields(match: MatchResult, upc_item_record_id: str) -> dict[str, Any]:
@@ -275,9 +343,13 @@ def _match_update_fields(match: MatchResult, upc_item_record_id: str) -> dict[st
     return fields
 
 
-def _find_record_by_field(base_id: str, table_id: str, field_id: str, value: str, token: str) -> dict[str, Any] | None:
-    safe_value = str(value).replace("'", "\\'")
-    formula = f"{{{{{field_id}}}}}='{safe_value}'"
+def _quote_airtable_formula_value(value: str) -> str:
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+    return f"'{escaped}'"
+
+
+def _find_record_by_field(base_id: str, table_id: str, field_name: str, value: str, token: str) -> dict[str, Any] | None:
+    formula = f"{{{field_name}}}={_quote_airtable_formula_value(str(value))}"
     payload = _http_json("GET", f"{AIRTABLE_API_URL}/{base_id}/{table_id}", token=token, params={"filterByFormula": formula, "maxRecords": 1})
     rows = payload.get("records", [])
     return rows[0] if rows else None
@@ -296,7 +368,7 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
     item_cache: dict[str, str] = {}
     for match in syncable:
         if match.item_key not in item_cache:
-            existing = _find_record_by_field(settings.airtable_base_id, UPC_ITEMS_TABLE_ID, UPC_ITEM_FIELDS["item_key"], match.item_key, token)
+            existing = _find_record_by_field(settings.airtable_base_id, UPC_ITEMS_TABLE_ID, UPC_ITEM_KEY_FIELD_NAME, match.item_key, token)
             if existing:
                 _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}/{existing['id']}", token=token, payload={"fields": _upc_item_update_fields(match.decision)})
                 item_cache[match.item_key] = existing["id"]
@@ -305,7 +377,7 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
                 rec = _http_json("POST", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}", token=token, payload={"fields": _upc_item_create_fields(match.decision)})
                 item_cache[match.item_key] = rec["id"]
                 created_items += 1
-        existing_match = _find_record_by_field(settings.airtable_base_id, MATCHES_TABLE_ID, MATCH_FIELDS["sync_key"], match.sync_key, token)
+        existing_match = _find_record_by_field(settings.airtable_base_id, MATCHES_TABLE_ID, MATCH_SYNC_KEY_FIELD_NAME, match.sync_key, token)
         if existing_match:
             _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{MATCHES_TABLE_ID}/{existing_match['id']}", token=token, payload={"fields": _match_update_fields(match, item_cache[match.item_key])})
             updated_matches += 1
