@@ -72,6 +72,18 @@ def unsubmitted_form_html() -> str:
     """
 
 
+def failure_html() -> str:
+    return "<html><body>The API is currently unavailable</body></html>"
+
+
+def page_html_value(value) -> str:
+    if isinstance(value, list):
+        if len(value) > 1:
+            return value.pop(0)
+        return value[0]
+    return value
+
+
 class FakeLocator:
     def __init__(self, page: "FakePage", selector: str):
         self.page = page
@@ -111,7 +123,8 @@ class FakePage:
 
     @property
     def next_page(self) -> int | None:
-        html = self.pages.get(self.current_window, "") if self.current_window is not None else self.pages.get(self.current_page, "")
+        value = self.pages.get(self.current_window, "") if self.current_window is not None else self.pages.get(self.current_page, "")
+        html = page_html_value(value)
         match = re.search(r'href="\?page=(\d+)"', html)
         return int(match.group(1)) if match else None
 
@@ -125,8 +138,8 @@ class FakePage:
 
     async def content(self) -> str:
         if self.current_window is not None:
-            return self.pages.get(self.current_window, "")
-        return self.pages.get(self.current_page, "")
+            return page_html_value(self.pages.get(self.current_window, ""))
+        return page_html_value(self.pages.get(self.current_page, ""))
 
     def locator(self, selector: str) -> FakeLocator:
         return FakeLocator(self, selector)
@@ -206,6 +219,8 @@ def make_settings(tmp_path: Path) -> Settings:
         date_from="",
         date_to="",
         date_window_days=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=3,
         latest_export_limit=50,
         write_all_json=False,
     )
@@ -477,6 +492,8 @@ def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
         date_from="2024-01-01",
         date_to="2026-04-24",
         date_window_days=7,
+        index_page_retry_delay_seconds=30,
+        index_page_max_retries=3,
         write_all_json=False,
     )
 
@@ -512,6 +529,25 @@ def test_duplicate_page_zero_signature_is_not_counted_as_discovered(tmp_path: Pa
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
     assert items == []
+
+
+def test_index_page_failure_retries_same_page_before_collecting(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: [failure_html(), index_html(1, "node-101", next_page=None)],
+    }
+    settings = replace(
+        make_settings(tmp_path),
+        source_url="https://example.test/index?filter=1",
+        max_pages=2,
+        max_items=0,
+        index_page_retry_delay_seconds=0,
+        index_page_max_retries=1,
+    )
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-100", "node-101"]
 
 
 def test_later_form_submit_reset_is_not_counted_as_requested_page(tmp_path: Path) -> None:

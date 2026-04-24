@@ -310,6 +310,49 @@ async def parse_or_submit_index_page(page, settings: Settings, debug_dir: Path, 
     return html, page_items, True
 
 
+def is_retryable_index_page_error(exc: Exception) -> bool:
+    if not isinstance(exc, ScraperError):
+        return False
+    message = str(exc)
+    return (
+        "appears to be unavailable or challenged" in message
+        or "became unavailable or challenged" in message
+    )
+
+
+async def load_and_parse_index_page(
+    page,
+    settings: Settings,
+    debug_dir: Path,
+    page_number: int,
+    url: str,
+    needs_goto: bool,
+) -> tuple[str, list[IndexItem], bool]:
+    max_retries = max(settings.index_page_max_retries, 0)
+    max_attempts = max_retries + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            if needs_goto:
+                await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+            await accept_cookies(page)
+            await settle_page(page, settings)
+            return await parse_or_submit_index_page(page, settings, debug_dir, page_number)
+        except Exception as exc:
+            if attempt >= max_attempts or not is_retryable_index_page_error(exc):
+                raise
+            logger.warning(
+                "UPC index page %s failed transiently on attempt %s/%s; retrying after %s second(s): %s",
+                page_number,
+                attempt,
+                max_attempts,
+                settings.index_page_retry_delay_seconds,
+                exc,
+            )
+            await asyncio.sleep(settings.index_page_retry_delay_seconds)
+
+    raise AssertionError("unreachable index page retry loop")
+
+
 async def discover_date_window_items_for_source(page, settings: Settings, debug_dir: Path, source_url: str) -> list[IndexItem]:
     start, end = configured_date_range(settings)
     stack = list(reversed(date_windows(start, end, settings.date_window_days)))
@@ -443,11 +486,14 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     url,
                     "goto" if needs_goto else "clicked-page",
                 )
-                if needs_goto:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
-                    await accept_cookies(page)
-                    await settle_page(page, settings)
-                html, page_items, submitted_form = await parse_or_submit_index_page(page, settings, debug_dir, page_number)
+                html, page_items, submitted_form = await load_and_parse_index_page(
+                    page,
+                    settings,
+                    debug_dir,
+                    page_number,
+                    url,
+                    needs_goto,
+                )
                 actual_url = page.url
                 actual_page_number = parse_page_number(actual_url)
                 signature = item_signature(page_items)
