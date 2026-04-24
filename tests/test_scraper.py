@@ -183,9 +183,11 @@ class FakePage:
 class FakeContext:
     def __init__(self, pages: dict):
         self.pages = pages
+        self.last_page: FakePage | None = None
 
     async def new_page(self) -> FakePage:
-        return FakePage(self.pages)
+        self.last_page = FakePage(self.pages)
+        return self.last_page
 
 
 def make_index_item() -> IndexItem:
@@ -610,6 +612,21 @@ def test_index_page_failure_retries_same_page_before_collecting(tmp_path: Path) 
     items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
 
     assert [item.item_key for item in items] == ["node-100", "node-101"]
+
+
+def test_discovery_prefers_clicking_next_pager_before_direct_page_url(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: index_html(1, "node-101", next_page=None),
+    }
+    context = FakeContext(pages)
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", max_pages=2, max_items=0)
+
+    items = asyncio.run(discover_items(context, settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-100", "node-101"]
+    assert context.last_page is not None
+    assert context.last_page.visited_urls == [build_index_url("https://example.test/index?filter=1", 0)]
 
 
 def test_index_page_retry_exhaustion_returns_partial_results(tmp_path: Path) -> None:

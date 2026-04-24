@@ -228,6 +228,28 @@ async def submit_decisions_form(page, settings: Settings) -> bool:
     return False
 
 
+async def click_next_pager(page, settings: Settings) -> bool:
+    selectors = (
+        "li.pager__item--next a[href]",
+        "a[rel='next'][href]",
+        "a[title='Go to next page'][href]",
+    )
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if not await locator.count():
+                continue
+            href = await locator.get_attribute("href")
+            logger.info("clicking UPC next pager link %s", href or "")
+            await locator.click(timeout=settings.navigation_timeout_ms)
+            await accept_cookies(page)
+            await settle_page(page, settings)
+            return True
+        except Exception as exc:
+            logger.debug("could not click pager link %s: %s", selector, exc)
+    return False
+
+
 def dedupe_items(items: list[IndexItem]) -> list[IndexItem]:
     seen: set[str] = set()
     deduped: list[IndexItem] = []
@@ -277,15 +299,17 @@ async def load_upc_html_page(
     url: str,
     debug_prefix: str,
     description: str,
+    use_current_page: bool = False,
 ) -> str:
     max_retries = max(settings.index_page_max_retries, 0)
     max_attempts = max_retries + 1
     last_html = ""
     for attempt in range(1, max_attempts + 1):
         try:
-            await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
-            await accept_cookies(page)
-            await settle_page(page, settings)
+            if not (use_current_page and attempt == 1):
+                await page.goto(url, wait_until="domcontentloaded", timeout=settings.navigation_timeout_ms)
+                await accept_cookies(page)
+                await settle_page(page, settings)
             html = await page.content()
         except Exception as exc:
             if attempt >= max_attempts:
@@ -382,6 +406,7 @@ async def load_and_parse_index_page(
     url: str,
     debug_prefix: str | None = None,
     description: str | None = None,
+    use_current_page: bool = False,
 ) -> tuple[str, list[IndexItem], bool]:
     max_retries = max(settings.index_page_max_retries, 0)
     max_attempts = max_retries + 1
@@ -395,6 +420,7 @@ async def load_and_parse_index_page(
             url,
             debug_prefix,
             description,
+            use_current_page=use_current_page and attempt == 1,
         )
         try:
             return await parse_or_submit_index_page(page, settings, debug_dir, page_number, html)
@@ -536,11 +562,13 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
             page_number = 0
             pages_collected = 0
             url = build_index_url(source_url, 0)
+            use_current_page = False
             while url:
-                if url in seen_urls:
+                if not use_current_page and url in seen_urls:
                     logger.warning("stopping discovery because pager looped back to %s", url)
                     break
-                seen_urls.add(url)
+                if not use_current_page:
+                    seen_urls.add(url)
 
                 logger.info(
                     "discovering UPC index requested_page=%s url=%s",
@@ -553,7 +581,9 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                     debug_dir,
                     page_number,
                     url,
+                    use_current_page=use_current_page,
                 )
+                use_current_page = False
                 actual_url = page.url
                 actual_page_number = parse_page_number(actual_url)
                 logger.info(
@@ -641,8 +671,10 @@ async def discover_items(context, settings: Settings, debug_dir: Path) -> list[I
                 )
 
                 logger.info("using selected next pager URL: %s", next_url)
+                clicked = await click_next_pager(page, settings)
                 url = next_url
                 page_number = next_page_number if next_page_number > page_number else page_number + 1
+                use_current_page = clicked
 
             return discovered_items(items, settings)
         except Exception as exc:
