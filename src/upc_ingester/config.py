@@ -82,6 +82,8 @@ class Settings:
     date_from: str
     date_to: str
     date_window_days: int
+    index_page_retry_delay_seconds: int
+    index_page_max_retries: int
     latest_export_limit: int
     write_all_json: bool
 
@@ -110,6 +112,8 @@ class Settings:
             date_from=os.getenv("DATE_FROM", ""),
             date_to=os.getenv("DATE_TO", ""),
             date_window_days=env_int("DATE_WINDOW_DAYS", 0),
+            index_page_retry_delay_seconds=env_int("INDEX_PAGE_RETRY_DELAY_SECONDS", 30),
+            index_page_max_retries=env_int("INDEX_PAGE_MAX_RETRIES", 3),
             latest_export_limit=env_int("LATEST_EXPORT_LIMIT", 50),
             write_all_json=env_bool("WRITE_ALL_JSON", False),
         )
