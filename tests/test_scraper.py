@@ -1,4 +1,5 @@
 import asyncio
+import re
 from dataclasses import replace
 from pathlib import Path
 
@@ -9,12 +10,135 @@ from upc_ingester.parser import IndexItem
 from upc_ingester.scraper import (
     build_index_url,
     cap_items,
+    discover_items,
     ingest_discovered_items,
     needs_enrichment,
     parse_page_number,
     select_next_index_url,
     upsert_index_only_item,
 )
+
+
+def index_html(page_number: int, item_key: str, next_page: int | None = None) -> str:
+    next_link = f'<a rel="next" href="?page={next_page}">Next</a>' if next_page is not None else ""
+    node_id = item_key.removeprefix("node-")
+    return f"""
+    <!doctype html>
+    <html>
+    <body>
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th>Registry number/Order reference</th>
+            <th>Court</th>
+            <th>Type of action</th>
+            <th>Parties</th>
+            <th>UPC Document</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>{15 + page_number} April, 2026</td>
+            <td>ACT_{node_id}/2026<br>ORD_{node_id}/2026<br><a href="/en/node/{node_id}">Full Details</a></td>
+            <td>Local Division Paris</td>
+            <td>Infringement action</td>
+            <td>Claimant {node_id}<br>v.<br>Defendant {node_id}</td>
+            <td>Order</td>
+          </tr>
+        </tbody>
+      </table>
+      {next_link}
+    </body>
+    </html>
+    """
+
+
+def unsubmitted_form_html() -> str:
+    return """
+    <!doctype html>
+    <html>
+    <body>
+      <p>Please submit the form below to get your result</p>
+      <form data-drupal-selector="views-exposed-form-collection-of-judgements-page-1">
+        <input id="edit-submit-collection-of-judgements" type="submit" value="Apply">
+      </form>
+    </body>
+    </html>
+    """
+
+
+class FakeLocator:
+    def __init__(self, page: "FakePage", selector: str):
+        self.page = page
+        self.selector = selector
+        self.first = self
+
+    async def count(self) -> int:
+        if "pager" in self.selector or "rel='next'" in self.selector or "Go to next" in self.selector:
+            return 1 if self.page.next_page is not None else 0
+        if "edit-submit-collection-of-judgements" in self.selector or "views-exposed-form" in self.selector:
+            return 1 if "edit-submit-collection-of-judgements" in self.page.pages.get(self.page.current_page, "") else 0
+        return 0
+
+    async def get_attribute(self, name: str) -> str:
+        if name == "href" and self.page.next_page is not None:
+            return f"?page={self.page.next_page}"
+        return ""
+
+    async def click(self, timeout: int = 0) -> None:
+        if "edit-submit-collection-of-judgements" in self.selector or "views-exposed-form" in self.selector:
+            self.page.current_page = 0
+            self.page.url = build_index_url(self.page.base_url, 0)
+            return
+        if self.page.next_page is None:
+            return
+        self.page.current_page = self.page.next_page
+        self.page.url = build_index_url(self.page.base_url, self.page.current_page)
+
+
+class FakePage:
+    def __init__(self, pages: dict[int, str], base_url: str = "https://example.test/index?filter=1"):
+        self.pages = pages
+        self.base_url = base_url
+        self.current_page = 0
+        self.url = build_index_url(base_url, 0)
+
+    @property
+    def next_page(self) -> int | None:
+        html = self.pages.get(self.current_page, "")
+        match = re.search(r'href="\?page=(\d+)"', html)
+        return int(match.group(1)) if match else None
+
+    async def goto(self, url: str, wait_until: str = "", timeout: int = 0) -> None:
+        self.url = url
+        self.current_page = parse_page_number(url)
+
+    async def content(self) -> str:
+        return self.pages.get(self.current_page, "")
+
+    def locator(self, selector: str) -> FakeLocator:
+        return FakeLocator(self, selector)
+
+    async def wait_for_load_state(self, state: str, timeout: int = 0) -> None:
+        return None
+
+    async def wait_for_selector(self, selector: str, timeout: int = 0) -> None:
+        return None
+
+    async def wait_for_timeout(self, timeout: int) -> None:
+        return None
+
+    async def close(self) -> None:
+        return None
+
+
+class FakeContext:
+    def __init__(self, pages: dict[int, str]):
+        self.pages = pages
+
+    async def new_page(self) -> FakePage:
+        return FakePage(self.pages)
 
 
 def make_index_item() -> IndexItem:
@@ -289,7 +413,7 @@ def test_build_index_url_preserves_filter_query_and_sets_page() -> None:
     assert parse_page_number(built) == 22
 
 
-def test_later_unsubmitted_form_reset_uses_direct_next_page_url() -> None:
+def test_backward_pager_selects_deterministic_next_page_url() -> None:
     source_url = (
         "https://www.unifiedpatentcourt.org/en/decisions-and-orders"
         "?case_number_search=&registry_number=&judgement_type=All&division_1=125"
@@ -320,3 +444,57 @@ def test_settings_for_backfill_start_page(tmp_path: Path) -> None:
     assert settings.start_page == 22
     assert settings.max_pages == 80
     assert settings.max_items == 2200
+
+
+def test_start_page_walk_skips_earlier_pages_and_collects_requested_page(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: index_html(1, "node-101", next_page=2),
+        2: index_html(2, "node-102", next_page=None),
+    }
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=2, max_pages=1, max_items=0)
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert [item.item_key for item in items] == ["node-102"]
+
+
+def test_duplicate_page_zero_signature_is_not_counted_as_discovered(tmp_path: Path) -> None:
+    page_zero = index_html(0, "node-100", next_page=1)
+    pages = {
+        0: page_zero,
+        1: page_zero,
+    }
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=1, max_pages=1, max_items=0)
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert items == []
+
+
+def test_later_form_submit_reset_is_not_counted_as_requested_page(tmp_path: Path) -> None:
+    pages = {
+        0: index_html(0, "node-100", next_page=1),
+        1: unsubmitted_form_html(),
+    }
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=1, max_pages=1, max_items=0)
+
+    items = asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+
+    assert items == []
+
+
+def test_duplicate_page_zero_while_walking_to_start_fails_clearly(tmp_path: Path) -> None:
+    page_zero = index_html(0, "node-100", next_page=1)
+    pages = {
+        0: page_zero,
+        1: page_zero,
+    }
+    settings = replace(make_settings(tmp_path), source_url="https://example.test/index?filter=1", start_page=2, max_pages=1, max_items=0)
+
+    try:
+        asyncio.run(discover_items(FakeContext(pages), settings, tmp_path / "debug"))
+    except Exception as exc:
+        assert "could not reach start page 2" in str(exc)
+    else:
+        raise AssertionError("duplicate page while walking to start should fail clearly")
