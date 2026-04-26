@@ -110,6 +110,7 @@ def settings_for_backfill(
         index_page_max_retries=index_page_max_retries,
         latest_export_limit=max(base.latest_export_limit, min(max_items, 200)),
         write_all_json=write_all_json or base.write_all_json,
+        public_base_url=base.public_base_url,
     )
 
 

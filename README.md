@@ -16,6 +16,8 @@ The mirror is served at:
 - `http://localhost:8000/stats.json`
 - `http://localhost:8000/status.json`
 - `http://localhost:8000/all.ndjson`
+- `http://localhost:8000/items/{item_key}.json`
+- `http://localhost:8000/related/{item_key}.json`
 - mirrored PDFs under `http://localhost:8000/pdfs/...`
 
 ## Publish the Image
@@ -156,6 +158,7 @@ Environment variables:
 - `DATE_WINDOW_DAYS`: date-window size for shallow historical discovery, default `0` disabled; usually set via `backfill --date-window-days`
 - `INDEX_PAGE_RETRY_DELAY_SECONDS`: seconds to wait before retrying a UPC HTML page that appears unavailable or challenged, default `30`
 - `INDEX_PAGE_MAX_RETRIES`: retry count for the same UPC HTML page URL before failing or returning partial index results, default `3`
+- `PUBLIC_BASE_URL`: public origin used when generating absolute mirror/context URLs, default `https://upc.edlaughton.uk`
 
 ## Unraid Compose Alternative
 
@@ -178,6 +181,9 @@ and deploy it. The compose file persists all app data under `/mnt/user/appdata/u
 /data/public/status.json
 /data/public/all.ndjson
 /data/public/all.json        # only when WRITE_ALL_JSON=true or --write-all-json is used
+/data/public/items/<item_key>.json
+/data/public/items/<item_key>.html
+/data/public/related/<item_key>.json
 /data/public/pdfs/YYYY/node-NNNNN/<stable-name>.pdf
 /data/debug/<run-id>/
 ```
@@ -192,6 +198,8 @@ Debug directories contain saved HTML, screenshots, and small diagnostic notes wh
 - Full headnotes and keywords are stored in SQLite and emitted in `/latest.json`. The HTML table intentionally shows short previews only.
 - `/stats.html` and `/stats.json` are generated from already-ingested SQLite records only. The statistics are descriptive and separate UPC decision/order statistics from scraper/data-quality health.
 - `/status.json` is operational run status. `/all.ndjson` is a full machine-readable export, while `/latest.json` is capped by `LATEST_EXPORT_LIMIT`.
+- `/items/{item_key}.json` is an agent-friendly public context document for one UPC item. It includes public decision/order metadata, absolute mirrored PDF URL, official UPC PDF URL, local item HTML URL, and links to item/related context JSON.
+- `/related/{item_key}.json` gives compact public context around an item: same case or registry number, same adverse party pair, and items involving overlapping normalised party names. Related lists are capped so agents can fetch context without downloading the full catalogue.
 - PDF bytes are validated as PDFs and hashed with SHA-256 before an item is marked seen.
 
 ## Tests
@@ -208,6 +216,18 @@ The unit tests use local HTML fixtures and do not require a live browser.
 
 This project now supports private watch-profile matching and optional Airtable sync for **matched alerts only**.
 
+### Agent workflow architecture
+
+The intended ChatGPT/Airtable workflow keeps Airtable small and private:
+
+- `/data/upc.sqlite3` and the static files at `upc.edlaughton.uk` remain the public UPC context source.
+- Airtable stores private watch profiles and a lightweight matched-item review queue.
+- Airtable UPC Item rows contain enough metadata to triage a match, plus absolute public context links when the optional fields exist:
+  - `Context URL` -> `https://upc.edlaughton.uk/items/{item_key}.json`
+  - `Related context URL` -> `https://upc.edlaughton.uk/related/{item_key}.json`
+- ChatGPT/Airtable agents should fetch those public JSON URLs for full decision/order context instead of expecting Airtable to contain the full UPC database.
+- Private watch profiles, match reasons, reviewer decisions, and alert outputs stay out of `/data/public`.
+
 Important design rules:
 
 - SQLite and local files under `/data` remain the full UPC mirror and source of truth.
@@ -216,6 +236,7 @@ Important design rules:
 - No PDFs are uploaded to Airtable; only URLs/metadata are synced.
 - No Airtable AI/Automations are required.
 - Private alerts/watch profiles must stay private and are never written to `/data/public`.
+- Public JSON context contains public UPC decision/order data and mirror links only.
 
 Airtable Free warning:
 

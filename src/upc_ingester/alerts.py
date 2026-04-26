@@ -16,9 +16,11 @@ from urllib.request import Request, urlopen
 
 from .config import DEFAULT_PUBLIC_BASE_URL, Settings
 from .db import Database
+from .urls import absolute_public_url, public_item_json_url, public_related_json_url
 
 logger = logging.getLogger(__name__)
 AIRTABLE_API_URL = "https://api.airtable.com/v0"
+AIRTABLE_META_API_URL = "https://api.airtable.com/v0/meta"
 UPC_ITEMS_TABLE_ID = "tblXzaunrmB52AYAn"
 WATCH_PROFILES_TABLE_ID = "tblj5iRsGKHucmaVe"
 MATCHES_TABLE_ID = "tbluFfUUnYeI1GfmP"
@@ -26,6 +28,7 @@ UPC_ITEM_KEY_FIELD_NAME = "Item key"
 MATCH_SYNC_KEY_FIELD_NAME = "Sync key"
 
 UPC_ITEM_FIELDS = {"item_key": "fld7QIzJJn2TkdT0G", "decision_date": "fldHpBLNBbxlRrHr4", "first_seen_at": "fldy19CTje2vDn0uA", "case_number": "fldh0LqWPZA3udV8d", "registry_number": "fldmdRNrXoPtsFztV", "division": "fldbjL3hih0KbAJmM", "document_type": "fldUiEsARsQdyxK8l", "type_of_action": "fldYkaJlCPv49SX6q", "language": "fldCbQdvS6wsYZdBD", "parties_raw": "fldAtKQaJYOwZYYbV", "party_names": "fldRijRgrk4tNto75", "headnote": "fldoXWqS9FHIHuKMf", "keywords": "fldFDCoYsMZKlz01O", "mirror_url": "fldTWvWTAfzkAFXpT", "official_pdf_url": "fldHwpA6oVwT883ck", "pdf_text_available": "fldMMknYefGqluoJl", "status": "fldGi0z9O0nMSsrxb", "notes": "fldzFvx7X39KtolyE"}
+OPTIONAL_UPC_ITEM_FIELD_NAMES = {"item_context_url": "Context URL", "related_context_url": "Related context URL"}
 WATCH_PROFILE_FIELDS = {"profile_name": "fldHcGbPUISXVG30k", "alert_type": "fldIJvi2gwGWGOeDI", "parties_to_watch": "fldV8ZBIfHjNxN5ya", "sector_terms": "fldw0gyEpkhShsr9c", "legal_terms": "fldjOSms0Gxvethnn", "competitors": "fldu3IKj4RKCVwHsJ", "active": "fldokHp9rr98TxLuX"}
 WATCH_PROFILE_FIELD_NAMES = {"profile_name": "Profile name", "alert_type": "Alert type", "parties_to_watch": "Parties to watch", "sector_terms": "Sector terms", "legal_terms": "Legal terms/rules", "competitors": "Competitors/related entities", "active": "Active"}
 MATCH_FIELDS = {"match_id": "fld5ZiLZTJBQzVfxp", "upc_item": "fldVNi138U4L2kdxN", "watch_profile": "fldCTzGU1CzP5H4SH", "confidence": "fldhHhIHtN8ssNhLy", "matched_fields": "fldCTmcrGIh3SxI0h", "matched_terms": "fldP310q0LIQdaTI9", "private_reason": "fldkZJ3p43YF1Yg3M", "public_reason": "fldQKJteweTaafkqh", "recommended_action": "fldzdJ7YUg11CP3Re", "reviewer_decision": "fldClHnbVKV5dG4ym", "ai_draft": "fldJYP97bcClTfR3m", "human_edited_draft": "fld232as4RuA4RBAL", "sync_key": "fldGBNNeEfkk0HwZJ"}
@@ -74,15 +77,6 @@ def normalize_text(value: str) -> str:
 
 def split_terms(value: str) -> list[str]:
     return sorted({t for t in (normalize_text(x) for x in re.split(r"[\n,;]+", value or "")) if len(t) > 2})
-
-
-def absolute_public_url(value: str, public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> str:
-    text = str(value or "").strip()
-    if not text or re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
-        return text
-    if text.startswith("/"):
-        return f"{str(public_base_url or DEFAULT_PUBLIC_BASE_URL).rstrip('/')}/{text.lstrip('/')}"
-    return text
 
 
 def _stringify_airtable_value(value: Any) -> str:
@@ -481,8 +475,18 @@ def normalise_language(value: str) -> str:
             return label
     return "Other"
 
-def _upc_item_create_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
-    return {
+def _apply_optional_upc_item_fields(fields: dict[str, Any], decision: dict[str, Any], public_base_url: str, optional_fields: dict[str, str] | None) -> dict[str, Any]:
+    optional_fields = optional_fields or {}
+    item_key = str(decision.get("item_key", ""))
+    if field_id := optional_fields.get("item_context_url"):
+        fields[field_id] = public_item_json_url(item_key, public_base_url)
+    if field_id := optional_fields.get("related_context_url"):
+        fields[field_id] = public_related_json_url(item_key, public_base_url)
+    return fields
+
+
+def _upc_item_create_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL, optional_fields: dict[str, str] | None = None) -> dict[str, Any]:
+    fields = {
         UPC_ITEM_FIELDS["item_key"]: decision.get("item_key", ""),
         UPC_ITEM_FIELDS["decision_date"]: decision.get("decision_date", ""),
         UPC_ITEM_FIELDS["first_seen_at"]: decision.get("first_seen_at", ""),
@@ -501,10 +505,11 @@ def _upc_item_create_fields(decision: dict[str, Any], public_base_url: str = DEF
         UPC_ITEM_FIELDS["pdf_text_available"]: bool(_extract_pdf_text_if_available(decision)),
         UPC_ITEM_FIELDS["status"]: "New",
     }
+    return _apply_optional_upc_item_fields(fields, decision, public_base_url, optional_fields)
 
 
-def _upc_item_update_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
-    fields = _upc_item_create_fields(decision, public_base_url)
+def _upc_item_update_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL, optional_fields: dict[str, str] | None = None) -> dict[str, Any]:
+    fields = _upc_item_create_fields(decision, public_base_url, optional_fields)
     fields.pop(UPC_ITEM_FIELDS["status"], None)
     fields.pop(UPC_ITEM_FIELDS["notes"], None)
     return fields
@@ -545,6 +550,20 @@ def _find_record_by_field(base_id: str, table_id: str, field_name: str, value: s
     return rows[0] if rows else None
 
 
+def _load_optional_upc_item_fields(base_id: str, token: str) -> dict[str, str]:
+    try:
+        payload = _http_json("GET", f"{AIRTABLE_META_API_URL}/bases/{base_id}/tables", token=token)
+    except Exception:
+        logger.info("Airtable metadata unavailable; optional UPC Item context URL fields will be skipped", exc_info=True)
+        return {}
+    for table in payload.get("tables", []):
+        if table.get("id") != UPC_ITEMS_TABLE_ID:
+            continue
+        fields_by_name = {field.get("name"): field.get("id") for field in table.get("fields", [])}
+        return {key: fields_by_name[name] for key, name in OPTIONAL_UPC_ITEM_FIELD_NAMES.items() if fields_by_name.get(name)}
+    return {}
+
+
 def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], include_low_confidence: bool, max_sync_records: int, dry_run: bool, min_confidence: str = "Low") -> dict[str, Any]:
     token = _airtable_token()
     syncable = _syncable_matches(matches, include_low_confidence, min_confidence)
@@ -556,15 +575,16 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
         return {"syncable_matches": len(syncable), "estimated_records": estimated, "base_record_count_hint": total_hint, "created_items": 0, "updated_items": 0, "created_matches": 0, "updated_matches": 0}
     created_items = updated_items = created_matches = updated_matches = 0
     item_cache: dict[str, str] = {}
+    optional_upc_item_fields = _load_optional_upc_item_fields(settings.airtable_base_id, token)
     for match in syncable:
         if match.item_key not in item_cache:
             existing = _find_record_by_field(settings.airtable_base_id, UPC_ITEMS_TABLE_ID, UPC_ITEM_KEY_FIELD_NAME, match.item_key, token)
             if existing:
-                _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}/{existing['id']}", token=token, payload={"fields": _upc_item_update_fields(match.decision, settings.public_base_url)})
+                _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}/{existing['id']}", token=token, payload={"fields": _upc_item_update_fields(match.decision, settings.public_base_url, optional_upc_item_fields)})
                 item_cache[match.item_key] = existing["id"]
                 updated_items += 1
             else:
-                rec = _http_json("POST", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}", token=token, payload={"fields": _upc_item_create_fields(match.decision, settings.public_base_url)})
+                rec = _http_json("POST", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}", token=token, payload={"fields": _upc_item_create_fields(match.decision, settings.public_base_url, optional_upc_item_fields)})
                 item_cache[match.item_key] = rec["id"]
                 created_items += 1
         existing_match = _find_record_by_field(settings.airtable_base_id, MATCHES_TABLE_ID, MATCH_SYNC_KEY_FIELD_NAME, match.sync_key, token)

@@ -112,6 +112,16 @@ def test_airtable_item_payload_uses_configured_public_base_url() -> None:
     assert fields[UPC_ITEM_FIELDS["official_pdf_url"]] == "https://example.test/a.pdf"
 
 
+def test_airtable_item_payload_can_include_optional_context_urls() -> None:
+    fields = _upc_item_create_fields(
+        sample_decision(),
+        "https://mirror.example.test/",
+        {"item_context_url": "fldContext", "related_context_url": "fldRelated"},
+    )
+    assert fields["fldContext"] == "https://mirror.example.test/items/node-1.json"
+    assert fields["fldRelated"] == "https://mirror.example.test/related/node-1.json"
+
+
 def test_party_match_is_high() -> None:
     profile = WatchProfile("recA", "BD", "BD", ["acme corp"], [], [], [])
     matches = match_alerts([sample_decision()], [profile])
@@ -379,6 +389,39 @@ def test_airtable_profile_loader_skips_missing_active(monkeypatch: pytest.Monkey
 
     monkeypatch.setattr(a, "_http_json", fake_http_json)
     assert _load_watch_profiles_from_airtable("appBase", "token") == []
+
+
+def test_optional_airtable_context_fields_absent_is_backwards_compatible(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {"tables": [{"id": a.UPC_ITEMS_TABLE_ID, "fields": [{"id": "fldOther", "name": "Other"}]}]}
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    assert a._load_optional_upc_item_fields("appBase", "token") == {}
+
+
+def test_optional_airtable_context_fields_are_discovered(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "tables": [
+                {
+                    "id": a.UPC_ITEMS_TABLE_ID,
+                    "fields": [
+                        {"id": "fldContext", "name": "Context URL"},
+                        {"id": "fldRelated", "name": "Related context URL"},
+                    ],
+                }
+            ]
+        }
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    assert a._load_optional_upc_item_fields("appBase", "token") == {
+        "item_context_url": "fldContext",
+        "related_context_url": "fldRelated",
+    }
 
 
 def test_airtable_profile_loader_accepts_field_name_keys(monkeypatch: pytest.MonkeyPatch) -> None:
