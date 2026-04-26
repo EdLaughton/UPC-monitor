@@ -139,6 +139,10 @@ async def main_async() -> int:
             sync_airtable=args.sync_airtable,
             max_sync_records=args.airtable_max_sync_records,
             dry_run=args.dry_run,
+            diagnostics=args.diagnostics,
+            sample_limit=args.sample_limit,
+            profile=args.profile,
+            min_confidence=args.min_confidence,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

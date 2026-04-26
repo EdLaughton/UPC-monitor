@@ -336,6 +336,184 @@ def test_dry_run_summary_includes_profile_term_counts(tmp_path: Path, monkeypatc
     ]
 
 
+def test_dry_run_diagnostics_matches_by_profile_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    decisions = [
+        sample_decision() | {"item_key": "node-1", "parties_raw": "Acme Corp v. Rival LLC", "case_name_raw": "Acme Corp v. Rival LLC"},
+        sample_decision()
+        | {
+            "item_key": "node-2",
+            "parties_raw": "Acme Corp v. Other LLC",
+            "case_name_raw": "Acme Corp v. Other LLC",
+            "headnote_text": "",
+            "keywords_raw": "",
+            "keywords_list": [],
+        },
+        sample_decision()
+        | {
+            "item_key": "node-3",
+            "parties_raw": "Other v. Someone",
+            "party_names_all": ["Other", "Someone"],
+            "party_names_normalised": ["other", "someone"],
+            "case_name_raw": "Other v. Someone",
+            "headnote_text": "injunction question",
+        },
+    ]
+    profiles = [
+        WatchProfile("recParty", "Party Watch", "BD", ["acme corp"], [], [], []),
+        WatchProfile("recLegal", "Legal Watch", "Legal", [], [], ["injunction"], []),
+    ]
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: decisions)
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: profiles)
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+    )
+    by_profile = {row["profile"]: row for row in summary["matches_by_profile"]}
+    assert by_profile["Party Watch"]["matches_total"] == 2
+    assert by_profile["Party Watch"]["confidence"] == {"High": 2, "Medium": 0, "Low": 0}
+    assert by_profile["Party Watch"]["estimated_airtable_records"] == 4
+    assert by_profile["Party Watch"]["top_matched_terms"] == [{"term": "acme corp", "count": 2}]
+    assert by_profile["Party Watch"]["top_matched_fields"][0] == {"field": "parties_raw", "count": 2}
+    assert by_profile["Legal Watch"]["matches_total"] == 2
+    assert by_profile["Legal Watch"]["confidence"] == {"High": 0, "Medium": 2, "Low": 0}
+
+
+def test_dry_run_diagnostics_matches_by_term_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    decisions = [
+        sample_decision() | {"item_key": "node-1", "headnote_text": "injunction and pharma"},
+        sample_decision()
+        | {
+            "item_key": "node-2",
+            "parties_raw": "Neutral v. Other",
+            "party_names_all": ["Neutral", "Other"],
+            "party_names_normalised": ["neutral", "other"],
+            "case_name_raw": "Neutral v. Other",
+            "headnote_text": "injunction",
+        },
+    ]
+    profiles = [
+        WatchProfile("recLegal", "Legal Watch", "Legal", [], [], ["injunction"], []),
+        WatchProfile("recSector", "Sector Watch", "BD", [], ["pharma"], [], []),
+    ]
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: decisions)
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: profiles)
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+    )
+    by_term = {row["term"]: row for row in summary["matches_by_term"]}
+    assert by_term["injunction"] == {
+        "term": "injunction",
+        "count": 2,
+        "profiles": ["Legal Watch"],
+        "confidence": {"High": 0, "Medium": 2, "Low": 0},
+    }
+    assert by_term["pharma"]["count"] == 1
+    assert by_term["pharma"]["profiles"] == ["Sector Watch"]
+
+
+def test_dry_run_sample_match_includes_terms_fields_and_case_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    decision = sample_decision() | {
+        "case_number": "UPC_CFI_123/2026",
+        "primary_adverse_caption": "Acme Corp v. Rival LLC",
+        "node_url": "https://example.test/node/1",
+        "title_raw": "A very long title " * 20,
+    }
+    profile = WatchProfile("recParty", "Party Watch", "BD", ["acme corp"], [], [], [])
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: [decision])
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: [profile])
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+    )
+    sample = summary["sample_matches"][0]
+    assert sample["item_key"] == "node-1"
+    assert sample["decision_date"] == "2026-04-20"
+    assert sample["case_number"] == "UPC_CFI_123/2026"
+    assert sample["parties_raw"] == "Acme Corp v. Rival LLC"
+    assert sample["profile"] == "Party Watch"
+    assert sample["matched_terms"] == ["acme corp"]
+    assert "parties_raw" in sample["matched_fields"]
+    assert sample["mirror_url"] == "/pdfs/a.pdf"
+    assert sample["node_url"] == "https://example.test/node/1"
+    assert len(sample["title_raw"]) <= 160
+
+
+def test_profile_option_restricts_diagnostics_output(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    profiles = [
+        WatchProfile("recParty", "Party Watch", "BD", ["acme corp"], [], [], []),
+        WatchProfile("recLegal", "Legal Watch", "Legal", [], [], ["injunction"], []),
+    ]
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: [sample_decision()])
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: profiles)
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+        profile="Legal Watch",
+    )
+    assert summary["profiles_loaded"] == 1
+    assert summary["profile_filter"] == "Legal Watch"
+    assert [row["profile"] for row in summary["matches_by_profile"]] == ["Legal Watch"]
+    assert all(sample["profile"] == "Legal Watch" for sample in summary["sample_matches"])
+
+
+def test_sample_limit_controls_dry_run_sample_matches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    decisions = [
+        sample_decision() | {"item_key": f"node-{i}", "parties_raw": f"Acme Corp v. Other {i}", "case_name_raw": f"Acme Corp v. Other {i}"}
+        for i in range(5)
+    ]
+    profile = WatchProfile("recParty", "Party Watch", "BD", ["acme corp"], [], [], [])
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: decisions)
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: [profile])
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+        sample_limit=2,
+    )
+    assert len(summary["sample_matches"]) == 2
+    assert [sample["item_key"] for sample in summary["sample_matches"]] == ["node-0", "node-1"]
+
+
 def test_loaded_abbott_airtable_profile_matches_decision(monkeypatch: pytest.MonkeyPatch) -> None:
     from upc_ingester import alerts as a
 

@@ -6,6 +6,7 @@ import logging
 import os
 import re
 import tempfile
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -284,9 +285,109 @@ def _match_sync_filter(match: MatchResult, include_low_confidence: bool) -> bool
     return match.confidence in {"High", "Medium"} or (include_low_confidence and match.confidence == "Low")
 
 
-def estimate_airtable_records(matches: list[MatchResult], include_low_confidence: bool) -> int:
-    syncable = [m for m in matches if _match_sync_filter(m, include_low_confidence)]
+CONFIDENCE_ORDER = {"Low": 1, "Medium": 2, "High": 3}
+CONFIDENCE_LABELS = ("High", "Medium", "Low")
+
+
+def _confidence_at_least(confidence: str, min_confidence: str) -> bool:
+    return CONFIDENCE_ORDER.get(confidence, 0) >= CONFIDENCE_ORDER[min_confidence]
+
+
+def _display_match_filter(match: MatchResult, min_confidence: str) -> bool:
+    return _confidence_at_least(match.confidence, min_confidence)
+
+
+def _syncable_matches(matches: list[MatchResult], include_low_confidence: bool, min_confidence: str = "Low") -> list[MatchResult]:
+    return [m for m in matches if _match_sync_filter(m, include_low_confidence) and _confidence_at_least(m.confidence, min_confidence)]
+
+
+def estimate_airtable_records(matches: list[MatchResult], include_low_confidence: bool, min_confidence: str = "Low") -> int:
+    syncable = _syncable_matches(matches, include_low_confidence, min_confidence)
     return len({m.item_key for m in syncable}) + len(syncable)
+
+
+def _truncate(value: Any, limit: int = 160) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _count_by_confidence(matches: list[MatchResult]) -> dict[str, int]:
+    return {label: sum(1 for m in matches if m.confidence == label) for label in CONFIDENCE_LABELS}
+
+
+def _counter_items(counter: Counter[str], key: str, limit: int) -> list[dict[str, Any]]:
+    return [{key: value, "count": count} for value, count in counter.most_common(limit)]
+
+
+def _sample_match(match: MatchResult) -> dict[str, Any]:
+    decision = match.decision
+    return {
+        "item_key": match.item_key,
+        "decision_date": decision.get("decision_date", ""),
+        "case_number": decision.get("case_number", ""),
+        "parties_raw": _truncate(decision.get("parties_raw") or decision.get("primary_adverse_caption", "")),
+        "primary_adverse_caption": _truncate(decision.get("primary_adverse_caption", "")),
+        "profile": match.profile_name,
+        "confidence": match.confidence,
+        "matched_terms": match.matched_terms,
+        "matched_fields": match.matched_fields,
+        "title_raw": _truncate(decision.get("title_raw", "")),
+        "mirror_url": decision.get("pdf_url_mirror", ""),
+        "node_url": decision.get("node_url", ""),
+    }
+
+
+def build_alert_diagnostics(matches: list[MatchResult], *, include_low_confidence: bool, min_confidence: str, sample_limit: int) -> dict[str, Any]:
+    display_matches = [m for m in matches if _display_match_filter(m, min_confidence)]
+    by_profile: dict[tuple[str, str], list[MatchResult]] = defaultdict(list)
+    for match in display_matches:
+        by_profile[(match.profile_id, match.profile_name)].append(match)
+
+    matches_by_profile = []
+    for (profile_id, profile_name), profile_matches in sorted(by_profile.items(), key=lambda item: (-len(item[1]), item[0][1].lower())):
+        term_counts: Counter[str] = Counter()
+        field_counts: Counter[str] = Counter()
+        for match in profile_matches:
+            term_counts.update(match.matched_terms)
+            field_counts.update(match.matched_fields)
+        matches_by_profile.append(
+            {
+                "profile_id": profile_id,
+                "profile": profile_name,
+                "matches_total": len(profile_matches),
+                "confidence": _count_by_confidence(profile_matches),
+                "estimated_airtable_records": estimate_airtable_records(profile_matches, include_low_confidence, min_confidence),
+                "top_matched_terms": _counter_items(term_counts, "term", 10),
+                "top_matched_fields": _counter_items(field_counts, "field", 10),
+            }
+        )
+
+    by_term: dict[str, dict[str, Any]] = {}
+    for match in display_matches:
+        for term in match.matched_terms:
+            entry = by_term.setdefault(term, {"term": term, "count": 0, "profiles": set(), "confidence": Counter()})
+            entry["count"] += 1
+            entry["profiles"].add(match.profile_name)
+            entry["confidence"].update([match.confidence])
+
+    matches_by_term = []
+    for entry in sorted(by_term.values(), key=lambda item: (-item["count"], item["term"]))[:20]:
+        matches_by_term.append(
+            {
+                "term": entry["term"],
+                "count": entry["count"],
+                "profiles": sorted(entry["profiles"]),
+                "confidence": {label: entry["confidence"].get(label, 0) for label in CONFIDENCE_LABELS},
+            }
+        )
+
+    return {
+        "matches_by_profile": matches_by_profile,
+        "matches_by_term": matches_by_term,
+        "sample_matches": [_sample_match(m) for m in display_matches[:sample_limit]],
+    }
 
 
 def _record_count_hint(base_id: str, token: str) -> int | None:
@@ -403,10 +504,10 @@ def _find_record_by_field(base_id: str, table_id: str, field_name: str, value: s
     return rows[0] if rows else None
 
 
-def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], include_low_confidence: bool, max_sync_records: int, dry_run: bool) -> dict[str, Any]:
+def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], include_low_confidence: bool, max_sync_records: int, dry_run: bool, min_confidence: str = "Low") -> dict[str, Any]:
     token = _airtable_token()
-    syncable = [m for m in matches if _match_sync_filter(m, include_low_confidence)]
-    estimated = estimate_airtable_records(matches, include_low_confidence)
+    syncable = _syncable_matches(matches, include_low_confidence, min_confidence)
+    estimated = estimate_airtable_records(matches, include_low_confidence, min_confidence)
     if estimated > max_sync_records:
         raise RuntimeError(f"Refusing Airtable sync: estimated {estimated} records (UPC Items + Matches) exceeds cap {max_sync_records}. Use --airtable-max-sync-records to raise the cap.")
     total_hint = _record_count_hint(settings.airtable_base_id, token)
@@ -435,19 +536,27 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
     return {"syncable_matches": len(syncable), "estimated_records": estimated, "base_record_count_hint": total_hint, "created_items": created_items, "updated_items": updated_items, "created_matches": created_matches, "updated_matches": updated_matches}
 
 
-def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: bool, write_json: bool, sync_airtable: bool, max_sync_records: int, dry_run: bool) -> dict[str, Any]:
+def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: bool, write_json: bool, sync_airtable: bool, max_sync_records: int, dry_run: bool, diagnostics: bool = False, sample_limit: int = 10, profile: str = "", min_confidence: str = "Low") -> dict[str, Any]:
     db = Database(settings.db_path)
     db.init()
     decisions = load_recent_decisions(db, since_days)
     profiles = load_watch_profiles(settings)
+    if profile:
+        profile_key = normalize_text(profile)
+        profiles = [p for p in profiles if normalize_text(p.name) == profile_key]
     matches = match_alerts(decisions, profiles)
-    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "matches_total": len(matches), "matches_by_confidence": {"High": sum(1 for m in matches if m.confidence == "High"), "Medium": sum(1 for m in matches if m.confidence == "Medium"), "Low": sum(1 for m in matches if m.confidence == "Low")}, "matches_syncable": sum(1 for m in matches if _match_sync_filter(m, include_low_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence), "sample_matches": [{"item_key": m.item_key, "profile": m.profile_name, "confidence": m.confidence, "terms": m.matched_terms} for m in matches[:5]]}
+    sample_limit = max(0, sample_limit)
+    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "profile_filter": profile, "min_confidence": min_confidence, "matches_total": len(matches), "matches_by_confidence": _count_by_confidence(matches), "matches_syncable": len(_syncable_matches(matches, include_low_confidence, min_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence, min_confidence)}
+    if dry_run or diagnostics:
+        summary.update(build_alert_diagnostics(matches, include_low_confidence=include_low_confidence, min_confidence=min_confidence, sample_limit=sample_limit))
+    else:
+        summary["sample_matches"] = [_sample_match(m) for m in matches[:sample_limit]]
     if write_json:
         a, d = write_private_outputs(settings, matches)
         summary["alerts_json"] = str(a)
         summary["alerts_digest_source_json"] = str(d)
     if sync_airtable:
-        summary["airtable_sync"] = sync_matches_to_airtable(settings, matches, include_low_confidence, max_sync_records, dry_run)
+        summary["airtable_sync"] = sync_matches_to_airtable(settings, matches, include_low_confidence, max_sync_records, dry_run, min_confidence)
     return summary
 
 
@@ -459,3 +568,7 @@ def register_alerts_subcommand(subparsers: argparse._SubParsersAction[argparse.A
     p.add_argument("--since-days", type=int, default=7)
     p.add_argument("--include-low-confidence", action="store_true")
     p.add_argument("--airtable-max-sync-records", type=int, default=100)
+    p.add_argument("--diagnostics", action="store_true")
+    p.add_argument("--sample-limit", type=int, default=10)
+    p.add_argument("--profile", default="")
+    p.add_argument("--min-confidence", choices=list(CONFIDENCE_LABELS), default="Low")
