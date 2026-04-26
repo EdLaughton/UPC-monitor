@@ -16,9 +16,11 @@ from upc_ingester.alerts import (
     _match_create_fields,
     _match_update_fields,
     _quote_airtable_formula_value,
+    absolute_public_url,
     normalise_document_type,
     normalise_language,
     sync_matches_to_airtable,
+    UPC_ITEM_FIELDS,
     _upc_item_create_fields,
     _upc_item_update_fields,
     build_sync_key,
@@ -91,6 +93,23 @@ def sample_decision() -> dict:
 
 def test_split_terms_parsing() -> None:
     assert split_terms("Acme\nRival; pharma, Rule 212") == ["acme", "pharma", "rival", "rule 212"]
+
+
+def test_absolute_public_url_normalises_relative_mirror_paths() -> None:
+    assert absolute_public_url("/pdfs/2026/node-1/order.pdf", "https://upc.edlaughton.uk") == "https://upc.edlaughton.uk/pdfs/2026/node-1/order.pdf"
+    assert absolute_public_url("/pdfs/2026/node-1/order.pdf", "https://upc.edlaughton.uk/") == "https://upc.edlaughton.uk/pdfs/2026/node-1/order.pdf"
+
+
+def test_absolute_public_url_leaves_absolute_and_empty_values() -> None:
+    assert absolute_public_url("https://example.test/order.pdf", "https://upc.edlaughton.uk") == "https://example.test/order.pdf"
+    assert absolute_public_url("", "https://upc.edlaughton.uk") == ""
+    assert absolute_public_url(None, "https://upc.edlaughton.uk") == ""
+
+
+def test_airtable_item_payload_uses_configured_public_base_url() -> None:
+    fields = _upc_item_create_fields(sample_decision(), "https://mirror.example.test/")
+    assert fields[UPC_ITEM_FIELDS["mirror_url"]] == "https://mirror.example.test/pdfs/a.pdf"
+    assert fields[UPC_ITEM_FIELDS["official_pdf_url"]] == "https://example.test/a.pdf"
 
 
 def test_party_match_is_high() -> None:
@@ -178,6 +197,8 @@ def test_private_json_under_private_only(tmp_path: Path) -> None:
     payload = json.loads(alerts_path.read_text(encoding="utf-8"))
     assert payload["items"][0]["confidence_reason"] == "legal term match"
     assert payload["items"][0]["term_categories"]["legal"] == ["injunction"]
+    assert payload["items"][0]["decision"]["mirror_url"] == "https://upc.edlaughton.uk/pdfs/a.pdf"
+    assert payload["items"][0]["decision"]["official_pdf_url"] == "https://example.test/a.pdf"
 
 
 def test_airtable_payload_rules() -> None:
@@ -186,6 +207,8 @@ def test_airtable_payload_rules() -> None:
     update_fields = _upc_item_update_fields(d)
     assert any(k.startswith("fld") for k in create_fields)
     assert create_fields != update_fields
+    assert create_fields[UPC_ITEM_FIELDS["mirror_url"]] == "https://upc.edlaughton.uk/pdfs/a.pdf"
+    assert create_fields[UPC_ITEM_FIELDS["official_pdf_url"]] == "https://example.test/a.pdf"
 
     profile = WatchProfile("recA", "Legal", "Legal", [], [], ["injunction"], [])
     match = match_alerts([d], [profile])[0]
@@ -204,6 +227,7 @@ def test_scheduler_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("ALERTS_ENABLED", raising=False)
     monkeypatch.delenv("ALERTS_SYNC_AIRTABLE", raising=False)
     monkeypatch.delenv("ALERTS_SCHEDULE_HOUR", raising=False)
+    monkeypatch.delenv("PUBLIC_BASE_URL", raising=False)
     from upc_ingester.config import Settings as S
 
     s = S.from_env()
@@ -212,6 +236,14 @@ def test_scheduler_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert s.alerts_schedule_hour == 10
     assert s.alerts_schedule_minute == 5
     assert s.alerts_since_days == 7
+    assert s.public_base_url == "https://upc.edlaughton.uk"
+
+
+def test_public_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester.config import Settings as S
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://mirror.example.test/")
+    assert S.from_env().public_base_url == "https://mirror.example.test/"
 
 
 def test_overlapping_alert_guard(tmp_path: Path) -> None:
@@ -599,7 +631,7 @@ def test_dry_run_sample_match_includes_terms_fields_and_case_metadata(tmp_path: 
     assert sample["terms"] == ["acme corp"]
     assert sample["term_categories"]["watched_party"] == ["acme corp"]
     assert "parties_raw" in sample["matched_fields"]
-    assert sample["mirror_url"] == "/pdfs/a.pdf"
+    assert sample["mirror_url"] == "https://upc.edlaughton.uk/pdfs/a.pdf"
     assert sample["node_url"] == "https://example.test/node/1"
     assert len(sample["title_raw"]) <= 160
 

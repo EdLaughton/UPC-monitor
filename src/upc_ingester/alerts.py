@@ -14,7 +14,7 @@ from typing import Any
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .config import Settings
+from .config import DEFAULT_PUBLIC_BASE_URL, Settings
 from .db import Database
 
 logger = logging.getLogger(__name__)
@@ -74,6 +74,15 @@ def normalize_text(value: str) -> str:
 
 def split_terms(value: str) -> list[str]:
     return sorted({t for t in (normalize_text(x) for x in re.split(r"[\n,;]+", value or "")) if len(t) > 2})
+
+
+def absolute_public_url(value: str, public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> str:
+    text = str(value or "").strip()
+    if not text or re.match(r"^[a-z][a-z0-9+.-]*://", text, flags=re.IGNORECASE):
+        return text
+    if text.startswith("/"):
+        return f"{str(public_base_url or DEFAULT_PUBLIC_BASE_URL).rstrip('/')}/{text.lstrip('/')}"
+    return text
 
 
 def _stringify_airtable_value(value: Any) -> str:
@@ -295,7 +304,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 def write_private_outputs(settings: Settings, matches: list[MatchResult]) -> tuple[Path, Path]:
     private_dir = settings.data_dir / "private"
-    items = [{"item_key": m.item_key, "profile_name": m.profile_name, "profile_id": m.profile_id, "confidence": m.confidence, "confidence_reason": m.confidence_reason, "matched_fields": m.matched_fields, "matched_terms": m.matched_terms, "term_categories": m.term_categories, "private_reason": m.private_reason, "public_reason": m.public_reason, "recommended_action": m.recommended_action, "decision": {"decision_date": m.decision.get("decision_date", ""), "case_number": m.decision.get("case_number", ""), "registry_number": m.decision.get("registry_number", ""), "division": m.decision.get("division", ""), "document_type": m.decision.get("document_type", ""), "type_of_action": m.decision.get("type_of_action", ""), "mirror_url": m.decision.get("pdf_url_mirror", ""), "official_pdf_url": m.decision.get("pdf_url_official", ""), "node_url": m.decision.get("node_url", "")}} for m in matches]
+    items = [{"item_key": m.item_key, "profile_name": m.profile_name, "profile_id": m.profile_id, "confidence": m.confidence, "confidence_reason": m.confidence_reason, "matched_fields": m.matched_fields, "matched_terms": m.matched_terms, "term_categories": m.term_categories, "private_reason": m.private_reason, "public_reason": m.public_reason, "recommended_action": m.recommended_action, "decision": {"decision_date": m.decision.get("decision_date", ""), "case_number": m.decision.get("case_number", ""), "registry_number": m.decision.get("registry_number", ""), "division": m.decision.get("division", ""), "document_type": m.decision.get("document_type", ""), "type_of_action": m.decision.get("type_of_action", ""), "mirror_url": absolute_public_url(str(m.decision.get("pdf_url_mirror", "")), settings.public_base_url), "official_pdf_url": m.decision.get("pdf_url_official", ""), "node_url": m.decision.get("node_url", "")}} for m in matches]
     alerts = private_dir / "alerts.json"
     digest = private_dir / "alerts-digest-source.json"
     atomic_write_json(alerts, {"count": len(items), "items": items})
@@ -350,7 +359,7 @@ def _counter_items(counter: Counter[str], key: str, limit: int) -> list[dict[str
     return [{key: value, "count": count} for value, count in counter.most_common(limit)]
 
 
-def _sample_match(match: MatchResult) -> dict[str, Any]:
+def _sample_match(match: MatchResult, public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
     decision = match.decision
     return {
         "item_key": match.item_key,
@@ -366,12 +375,12 @@ def _sample_match(match: MatchResult) -> dict[str, Any]:
         "matched_fields": match.matched_fields,
         "term_categories": match.term_categories,
         "title_raw": _truncate(decision.get("title_raw", "")),
-        "mirror_url": decision.get("pdf_url_mirror", ""),
+        "mirror_url": absolute_public_url(str(decision.get("pdf_url_mirror", "")), public_base_url),
         "node_url": decision.get("node_url", ""),
     }
 
 
-def build_alert_diagnostics(matches: list[MatchResult], *, include_low_confidence: bool, min_confidence: str, sample_limit: int) -> dict[str, Any]:
+def build_alert_diagnostics(matches: list[MatchResult], *, include_low_confidence: bool, min_confidence: str, sample_limit: int, public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
     display_matches = [m for m in matches if _display_match_filter(m, min_confidence)]
     by_profile: dict[tuple[str, str], list[MatchResult]] = defaultdict(list)
     for match in display_matches:
@@ -418,7 +427,7 @@ def build_alert_diagnostics(matches: list[MatchResult], *, include_low_confidenc
     return {
         "matches_by_profile": matches_by_profile,
         "matches_by_term": matches_by_term,
-        "sample_matches": [_sample_match(m) for m in display_matches[:sample_limit]],
+        "sample_matches": [_sample_match(m, public_base_url) for m in display_matches[:sample_limit]],
     }
 
 
@@ -472,7 +481,7 @@ def normalise_language(value: str) -> str:
             return label
     return "Other"
 
-def _upc_item_create_fields(decision: dict[str, Any]) -> dict[str, Any]:
+def _upc_item_create_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
     return {
         UPC_ITEM_FIELDS["item_key"]: decision.get("item_key", ""),
         UPC_ITEM_FIELDS["decision_date"]: decision.get("decision_date", ""),
@@ -487,15 +496,15 @@ def _upc_item_create_fields(decision: dict[str, Any]) -> dict[str, Any]:
         UPC_ITEM_FIELDS["party_names"]: ", ".join(decision.get("party_names_all", []) or []),
         UPC_ITEM_FIELDS["headnote"]: decision.get("headnote_text", ""),
         UPC_ITEM_FIELDS["keywords"]: decision.get("keywords_raw", ""),
-        UPC_ITEM_FIELDS["mirror_url"]: decision.get("pdf_url_mirror", ""),
+        UPC_ITEM_FIELDS["mirror_url"]: absolute_public_url(str(decision.get("pdf_url_mirror", "")), public_base_url),
         UPC_ITEM_FIELDS["official_pdf_url"]: decision.get("pdf_url_official", ""),
         UPC_ITEM_FIELDS["pdf_text_available"]: bool(_extract_pdf_text_if_available(decision)),
         UPC_ITEM_FIELDS["status"]: "New",
     }
 
 
-def _upc_item_update_fields(decision: dict[str, Any]) -> dict[str, Any]:
-    fields = _upc_item_create_fields(decision)
+def _upc_item_update_fields(decision: dict[str, Any], public_base_url: str = DEFAULT_PUBLIC_BASE_URL) -> dict[str, Any]:
+    fields = _upc_item_create_fields(decision, public_base_url)
     fields.pop(UPC_ITEM_FIELDS["status"], None)
     fields.pop(UPC_ITEM_FIELDS["notes"], None)
     return fields
@@ -551,11 +560,11 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
         if match.item_key not in item_cache:
             existing = _find_record_by_field(settings.airtable_base_id, UPC_ITEMS_TABLE_ID, UPC_ITEM_KEY_FIELD_NAME, match.item_key, token)
             if existing:
-                _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}/{existing['id']}", token=token, payload={"fields": _upc_item_update_fields(match.decision)})
+                _http_json("PATCH", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}/{existing['id']}", token=token, payload={"fields": _upc_item_update_fields(match.decision, settings.public_base_url)})
                 item_cache[match.item_key] = existing["id"]
                 updated_items += 1
             else:
-                rec = _http_json("POST", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}", token=token, payload={"fields": _upc_item_create_fields(match.decision)})
+                rec = _http_json("POST", f"{AIRTABLE_API_URL}/{settings.airtable_base_id}/{UPC_ITEMS_TABLE_ID}", token=token, payload={"fields": _upc_item_create_fields(match.decision, settings.public_base_url)})
                 item_cache[match.item_key] = rec["id"]
                 created_items += 1
         existing_match = _find_record_by_field(settings.airtable_base_id, MATCHES_TABLE_ID, MATCH_SYNC_KEY_FIELD_NAME, match.sync_key, token)
@@ -580,9 +589,9 @@ def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: b
     sample_limit = max(0, sample_limit)
     summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "profile_filter": profile, "min_confidence": min_confidence, "matches_total": len(matches), "matches_by_confidence": _count_by_confidence(matches), "matches_syncable": len(_syncable_matches(matches, include_low_confidence, min_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence, min_confidence)}
     if dry_run or diagnostics:
-        summary.update(build_alert_diagnostics(matches, include_low_confidence=include_low_confidence, min_confidence=min_confidence, sample_limit=sample_limit))
+        summary.update(build_alert_diagnostics(matches, include_low_confidence=include_low_confidence, min_confidence=min_confidence, sample_limit=sample_limit, public_base_url=settings.public_base_url))
     else:
-        summary["sample_matches"] = [_sample_match(m) for m in matches[:sample_limit]]
+        summary["sample_matches"] = [_sample_match(m, settings.public_base_url) for m in matches[:sample_limit]]
     if write_json:
         a, d = write_private_outputs(settings, matches)
         summary["alerts_json"] = str(a)

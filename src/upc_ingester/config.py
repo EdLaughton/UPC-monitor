@@ -45,6 +45,8 @@ DEFAULT_FALLBACK_SOURCE_URL = (
     "&location_id=All"
 )
 
+DEFAULT_PUBLIC_BASE_URL = "https://upc.edlaughton.uk"
+
 
 def env_bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
@@ -93,6 +95,7 @@ class Settings:
     alerts_include_low_confidence: bool = False
     alerts_airtable_max_sync_records: int = 100
     airtable_base_id: str = "appzaT3sgr7AfBKkn"
+    public_base_url: str = DEFAULT_PUBLIC_BASE_URL
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -130,6 +133,7 @@ class Settings:
             alerts_include_low_confidence=env_bool("ALERTS_INCLUDE_LOW_CONFIDENCE", False),
             alerts_airtable_max_sync_records=env_int("ALERTS_AIRTABLE_MAX_SYNC_RECORDS", 100),
             airtable_base_id=os.getenv("AIRTABLE_BASE_ID", "appzaT3sgr7AfBKkn"),
+            public_base_url=os.getenv("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL),
         )
 
     def ensure_dirs(self) -> None:
