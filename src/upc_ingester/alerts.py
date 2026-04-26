@@ -52,6 +52,8 @@ class MatchResult:
     confidence: str
     matched_fields: list[str]
     matched_terms: list[str]
+    term_categories: dict[str, list[str]]
+    confidence_reason: str
     private_reason: str
     public_reason: str
     recommended_action: str
@@ -165,7 +167,7 @@ def _load_watch_profiles_from_airtable(base_id: str, token: str) -> list[WatchPr
         data = _http_json("GET", f"{AIRTABLE_API_URL}/{base_id}/{WATCH_PROFILES_TABLE_ID}", token=token, params=params)
         for rec in data.get("records", []):
             f = rec.get("fields", {})
-            if not _watch_profile_active(_watch_profile_field(f, "active", True)):
+            if not _watch_profile_active(_watch_profile_field(f, "active", False)):
                 continue
             out.append(
                 WatchProfile(
@@ -228,28 +230,55 @@ def match_decision(decision: dict[str, Any], profile: WatchProfile) -> MatchResu
     f = {"parties_raw": normalize_text(str(decision.get("parties_raw", ""))), "party_names_all": " ".join(normalize_text(str(x)) for x in decision.get("party_names_all", [])), "party_names_normalised": " ".join(normalize_text(str(x)) for x in decision.get("party_names_normalised", [])), "case_name_raw": normalize_text(str(decision.get("case_name_raw", ""))), "title_raw": normalize_text(str(decision.get("title_raw", ""))), "document_type": normalize_text(str(decision.get("document_type", ""))), "type_of_action": normalize_text(str(decision.get("type_of_action", ""))), "division": normalize_text(str(decision.get("division", ""))), "headnote_text": normalize_text(str(decision.get("headnote_text", ""))), "keywords_raw": normalize_text(str(decision.get("keywords_raw", ""))), "keywords_list": " ".join(normalize_text(str(x)) for x in decision.get("keywords_list", [])), "pdf_text": _extract_pdf_text_if_available(decision)}
     party_fields = ["parties_raw", "party_names_all", "party_names_normalised", "case_name_raw", "title_raw"]
     topical_fields = ["headnote_text", "keywords_raw", "keywords_list", "title_raw", "type_of_action", "document_type", "division", "pdf_text"]
-    matched_terms: list[str] = []
-    matched_fields: list[str] = []
-    confidence = "Low"
-    for term in profile.parties_to_watch + profile.competitors:
-        for field in party_fields:
-            if _term_in_text(term, f[field]):
-                matched_terms.append(term)
-                matched_fields.append(field)
-                confidence = "High"
-                break
-    if confidence != "High":
-        for term in profile.sector_terms + profile.legal_terms:
-            for field in topical_fields:
+    sector_fields = list(dict.fromkeys(party_fields + topical_fields))
+    fields_by_category: dict[str, list[str]] = {"watched_party": [], "competitor": [], "sector": [], "legal": []}
+    term_categories: dict[str, list[str]] = {"watched_party": [], "competitor": [], "sector": [], "legal": []}
+
+    def collect(category: str, terms: list[str], fields: list[str]) -> None:
+        for term in terms:
+            for field in fields:
                 if _term_in_text(term, f[field]):
-                    matched_terms.append(term)
-                    matched_fields.append(field)
-                    confidence = "Medium"
+                    term_categories[category].append(term)
+                    fields_by_category[category].append(field)
                     break
+
+    collect("watched_party", profile.parties_to_watch, party_fields)
+    collect("competitor", profile.competitors, party_fields)
+    collect("sector", profile.sector_terms, sector_fields)
+    collect("legal", profile.legal_terms, topical_fields)
+
+    term_categories = {category: sorted(set(terms)) for category, terms in term_categories.items()}
+    fields_by_category = {category: sorted(set(fields)) for category, fields in fields_by_category.items()}
+    matched_terms = sorted({term for terms in term_categories.values() for term in terms})
+    matched_fields = sorted({field for fields in fields_by_category.values() for field in fields})
+    watched_party_terms = term_categories["watched_party"]
+    competitor_terms = term_categories["competitor"]
+    sector_terms = term_categories["sector"]
+    legal_terms = term_categories["legal"]
+    if watched_party_terms:
+        confidence = "High"
+        confidence_reason = "watched party match" if not competitor_terms else "watched party plus competitor"
+    elif competitor_terms and sector_terms:
+        confidence = "High"
+        confidence_reason = "competitor plus sector context"
+    elif competitor_terms:
+        confidence = "Medium"
+        confidence_reason = "competitor match" if not legal_terms else "competitor plus legal context"
+    elif sector_terms:
+        confidence = "Medium"
+        confidence_reason = "sector term match"
+    elif legal_terms:
+        confidence = "Medium"
+        confidence_reason = "legal term match"
+    else:
+        confidence = "Low"
+        confidence_reason = ""
     if not matched_terms:
         return None
     profile_ref = profile.id or profile.name
-    return MatchResult(build_sync_key(str(decision.get("item_key", "")), profile_ref), profile.id, profile.name, str(decision.get("item_key", "")), confidence, sorted(set(matched_fields)), sorted(set(matched_terms)), f"Matched {profile.name} terms: {', '.join(sorted(set(matched_terms)))}", f"Potential relevance for profile {profile.name}", recommend_action(profile.alert_type, confidence), decision)
+    category_reason = "; ".join(f"{category}_terms={', '.join(terms)}" for category, terms in term_categories.items() if terms)
+    private_reason = f"Matched {profile.name}; confidence_reason={confidence_reason}; {category_reason}"
+    return MatchResult(build_sync_key(str(decision.get("item_key", "")), profile_ref), profile.id, profile.name, str(decision.get("item_key", "")), confidence, matched_fields, matched_terms, term_categories, confidence_reason, private_reason, f"Potential relevance for profile {profile.name}", recommend_action(profile.alert_type, confidence), decision)
 
 
 def match_alerts(decisions: list[dict[str, Any]], profiles: list[WatchProfile]) -> list[MatchResult]:
@@ -266,7 +295,7 @@ def atomic_write_json(path: Path, payload: Any) -> None:
 
 def write_private_outputs(settings: Settings, matches: list[MatchResult]) -> tuple[Path, Path]:
     private_dir = settings.data_dir / "private"
-    items = [{"item_key": m.item_key, "profile_name": m.profile_name, "profile_id": m.profile_id, "confidence": m.confidence, "matched_fields": m.matched_fields, "matched_terms": m.matched_terms, "private_reason": m.private_reason, "public_reason": m.public_reason, "recommended_action": m.recommended_action, "decision": {"decision_date": m.decision.get("decision_date", ""), "case_number": m.decision.get("case_number", ""), "registry_number": m.decision.get("registry_number", ""), "division": m.decision.get("division", ""), "document_type": m.decision.get("document_type", ""), "type_of_action": m.decision.get("type_of_action", ""), "mirror_url": m.decision.get("pdf_url_mirror", ""), "official_pdf_url": m.decision.get("pdf_url_official", ""), "node_url": m.decision.get("node_url", "")}} for m in matches]
+    items = [{"item_key": m.item_key, "profile_name": m.profile_name, "profile_id": m.profile_id, "confidence": m.confidence, "confidence_reason": m.confidence_reason, "matched_fields": m.matched_fields, "matched_terms": m.matched_terms, "term_categories": m.term_categories, "private_reason": m.private_reason, "public_reason": m.public_reason, "recommended_action": m.recommended_action, "decision": {"decision_date": m.decision.get("decision_date", ""), "case_number": m.decision.get("case_number", ""), "registry_number": m.decision.get("registry_number", ""), "division": m.decision.get("division", ""), "document_type": m.decision.get("document_type", ""), "type_of_action": m.decision.get("type_of_action", ""), "mirror_url": m.decision.get("pdf_url_mirror", ""), "official_pdf_url": m.decision.get("pdf_url_official", ""), "node_url": m.decision.get("node_url", "")}} for m in matches]
     alerts = private_dir / "alerts.json"
     digest = private_dir / "alerts-digest-source.json"
     atomic_write_json(alerts, {"count": len(items), "items": items})
@@ -331,8 +360,11 @@ def _sample_match(match: MatchResult) -> dict[str, Any]:
         "primary_adverse_caption": _truncate(decision.get("primary_adverse_caption", "")),
         "profile": match.profile_name,
         "confidence": match.confidence,
+        "confidence_reason": match.confidence_reason,
+        "terms": match.matched_terms,
         "matched_terms": match.matched_terms,
         "matched_fields": match.matched_fields,
+        "term_categories": match.term_categories,
         "title_raw": _truncate(decision.get("title_raw", "")),
         "mirror_url": decision.get("pdf_url_mirror", ""),
         "node_url": decision.get("node_url", ""),

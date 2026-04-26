@@ -99,22 +99,55 @@ def test_party_match_is_high() -> None:
     assert matches[0].confidence == "High"
 
 
-def test_competitor_match_is_high() -> None:
+def test_competitor_match_alone_is_medium() -> None:
     profile = WatchProfile("recA", "Comp", "Mixed", [], [], [], ["rival llc"])
     matches = match_alerts([sample_decision()], [profile])
+    assert matches[0].confidence == "Medium"
+    assert matches[0].confidence_reason == "competitor match"
+    assert matches[0].term_categories["competitor"] == ["rival llc"]
+
+
+def test_competitor_plus_sector_is_high() -> None:
+    profile = WatchProfile("recA", "Comp", "Mixed", [], ["pharma"], [], ["rival llc"])
+    matches = match_alerts([sample_decision()], [profile])
     assert matches[0].confidence == "High"
+    assert matches[0].confidence_reason == "competitor plus sector context"
+    assert matches[0].term_categories["competitor"] == ["rival llc"]
+    assert matches[0].term_categories["sector"] == ["pharma"]
+    assert "competitor_terms=rival llc" in matches[0].private_reason
+    assert "sector_terms=pharma" in matches[0].private_reason
+
+
+def test_competitor_plus_party_to_watch_is_high() -> None:
+    profile = WatchProfile("recA", "Comp", "Mixed", ["acme corp"], [], [], ["rival llc"])
+    matches = match_alerts([sample_decision()], [profile])
+    assert matches[0].confidence == "High"
+    assert matches[0].confidence_reason == "watched party plus competitor"
+    assert matches[0].term_categories["watched_party"] == ["acme corp"]
+    assert matches[0].term_categories["competitor"] == ["rival llc"]
+
+
+def test_competitor_plus_legal_only_is_medium() -> None:
+    profile = WatchProfile("recA", "Comp", "Mixed", [], [], ["injunction"], ["rival llc"])
+    matches = match_alerts([sample_decision()], [profile])
+    assert matches[0].confidence == "Medium"
+    assert matches[0].confidence_reason == "competitor plus legal context"
+    assert matches[0].term_categories["competitor"] == ["rival llc"]
+    assert matches[0].term_categories["legal"] == ["injunction"]
 
 
 def test_sector_term_match_is_medium() -> None:
     profile = WatchProfile("recA", "Sector", "Mixed", [], ["pharma"], [], [])
     matches = match_alerts([sample_decision()], [profile])
     assert matches[0].confidence == "Medium"
+    assert matches[0].confidence_reason == "sector term match"
 
 
 def test_legal_term_match_is_medium() -> None:
     profile = WatchProfile("recA", "Legal", "Legal interest", [], [], ["injunction"], [])
     matches = match_alerts([sample_decision()], [profile])
     assert matches[0].confidence == "Medium"
+    assert matches[0].confidence_reason == "legal term match"
 
 
 def test_absent_terms_no_match() -> None:
@@ -142,6 +175,9 @@ def test_private_json_under_private_only(tmp_path: Path) -> None:
     assert alerts_path == tmp_path / "private" / "alerts.json"
     assert digest_path == tmp_path / "private" / "alerts-digest-source.json"
     assert not (tmp_path / "public" / "alerts.json").exists()
+    payload = json.loads(alerts_path.read_text(encoding="utf-8"))
+    assert payload["items"][0]["confidence_reason"] == "legal term match"
+    assert payload["items"][0]["term_categories"]["legal"] == ["injunction"]
 
 
 def test_airtable_payload_rules() -> None:
@@ -156,6 +192,7 @@ def test_airtable_payload_rules() -> None:
     match_create = _match_create_fields(match, "recItem")
     match_update = _match_update_fields(match, "recItem")
     assert MATCH_FIELDS["match_id"] not in match_create
+    assert match_create[MATCH_FIELDS["confidence"]] == "Medium"
     assert MATCH_FIELDS["reviewer_decision"] not in match_update
     assert MATCH_FIELDS["ai_draft"] not in match_update
     assert MATCH_FIELDS["human_edited_draft"] not in match_update
@@ -271,6 +308,47 @@ def test_airtable_profile_loader_requests_and_reads_field_ids(monkeypatch: pytes
     assert profiles[0].competitors == ["dexcom", "medtronic"]
 
 
+def test_airtable_profile_loader_skips_active_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "records": [
+                {
+                    "id": "recInactive",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Inactive profile",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Acme",
+                        WATCH_PROFILE_FIELDS["active"]: False,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    assert _load_watch_profiles_from_airtable("appBase", "token") == []
+
+
+def test_airtable_profile_loader_skips_missing_active(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "records": [
+                {
+                    "id": "recMissingActive",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Missing active profile",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Acme",
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    assert _load_watch_profiles_from_airtable("appBase", "token") == []
+
+
 def test_airtable_profile_loader_accepts_field_name_keys(monkeypatch: pytest.MonkeyPatch) -> None:
     from upc_ingester import alerts as a
 
@@ -332,6 +410,66 @@ def test_dry_run_summary_includes_profile_term_counts(tmp_path: Path, monkeypatc
             "sector_terms": 1,
             "legal_terms": 2,
             "competitor_terms": 1,
+        }
+    ]
+
+
+def test_dry_run_summary_counts_only_active_airtable_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "records": [
+                {
+                    "id": "recActive",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Active profile",
+                        WATCH_PROFILE_FIELDS["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Acme",
+                        WATCH_PROFILE_FIELDS["active"]: True,
+                    },
+                },
+                {
+                    "id": "recInactive",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Inactive profile",
+                        WATCH_PROFILE_FIELDS["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Rival",
+                        WATCH_PROFILE_FIELDS["active"]: False,
+                    },
+                },
+                {
+                    "id": "recMissingActive",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Missing active profile",
+                        WATCH_PROFILE_FIELDS["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Ghost",
+                    },
+                },
+            ]
+        }
+
+    monkeypatch.setenv("AIRTABLE_TOKEN", "token")
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: [])
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+    )
+    assert summary["profiles_loaded"] == 1
+    assert summary["profiles_loaded_detail"] == [
+        {
+            "name": "Active profile",
+            "party_terms": 1,
+            "sector_terms": 0,
+            "legal_terms": 0,
+            "competitor_terms": 0,
         }
     ]
 
@@ -456,7 +594,10 @@ def test_dry_run_sample_match_includes_terms_fields_and_case_metadata(tmp_path: 
     assert sample["case_number"] == "UPC_CFI_123/2026"
     assert sample["parties_raw"] == "Acme Corp v. Rival LLC"
     assert sample["profile"] == "Party Watch"
+    assert sample["confidence_reason"] == "watched party match"
     assert sample["matched_terms"] == ["acme corp"]
+    assert sample["terms"] == ["acme corp"]
+    assert sample["term_categories"]["watched_party"] == ["acme corp"]
     assert "parties_raw" in sample["matched_fields"]
     assert sample["mirror_url"] == "/pdfs/a.pdf"
     assert sample["node_url"] == "https://example.test/node/1"
