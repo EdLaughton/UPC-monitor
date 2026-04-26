@@ -88,11 +88,15 @@ class Settings:
     latest_export_limit: int
     write_all_json: bool
     alerts_enabled: bool = False
+    alerts_after_ingestion: bool = False
     alerts_sync_airtable: bool = False
     alerts_schedule_hour: int = 10
     alerts_schedule_minute: int = 5
-    alerts_since_days: int = 7
+    alerts_since_days: int = 2
     alerts_include_low_confidence: bool = False
+    alerts_min_confidence: str = "High"
+    alerts_profile_filter: str = ""
+    alerts_sync_limit: int = 0
     alerts_airtable_max_sync_records: int = 100
     airtable_base_id: str = "appzaT3sgr7AfBKkn"
     public_base_url: str = DEFAULT_PUBLIC_BASE_URL
@@ -126,11 +130,15 @@ class Settings:
             latest_export_limit=env_int("LATEST_EXPORT_LIMIT", 50),
             write_all_json=env_bool("WRITE_ALL_JSON", False),
             alerts_enabled=env_bool("ALERTS_ENABLED", False),
+            alerts_after_ingestion=env_bool("ALERTS_AFTER_INGESTION", False),
             alerts_sync_airtable=env_bool("ALERTS_SYNC_AIRTABLE", False),
             alerts_schedule_hour=env_int("ALERTS_SCHEDULE_HOUR", 10),
             alerts_schedule_minute=env_int("ALERTS_SCHEDULE_MINUTE", 5),
-            alerts_since_days=env_int("ALERTS_SINCE_DAYS", 7),
+            alerts_since_days=env_int("ALERTS_SINCE_DAYS", 2),
             alerts_include_low_confidence=env_bool("ALERTS_INCLUDE_LOW_CONFIDENCE", False),
+            alerts_min_confidence=os.getenv("ALERTS_MIN_CONFIDENCE", "High"),
+            alerts_profile_filter=os.getenv("ALERTS_PROFILE_FILTER", ""),
+            alerts_sync_limit=env_int("ALERTS_SYNC_LIMIT", 0),
             alerts_airtable_max_sync_records=env_int("ALERTS_AIRTABLE_MAX_SYNC_RECORDS", 100),
             airtable_base_id=os.getenv("AIRTABLE_BASE_ID", "appzaT3sgr7AfBKkn"),
             public_base_url=os.getenv("PUBLIC_BASE_URL", DEFAULT_PUBLIC_BASE_URL),

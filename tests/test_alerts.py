@@ -1,5 +1,6 @@
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -242,10 +243,14 @@ def test_scheduler_defaults_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     s = S.from_env()
     assert s.alerts_enabled is False
+    assert s.alerts_after_ingestion is False
     assert s.alerts_sync_airtable is False
     assert s.alerts_schedule_hour == 10
     assert s.alerts_schedule_minute == 5
-    assert s.alerts_since_days == 7
+    assert s.alerts_since_days == 2
+    assert s.alerts_min_confidence == "High"
+    assert s.alerts_profile_filter == ""
+    assert s.alerts_sync_limit == 0
     assert s.public_base_url == "https://upc.edlaughton.uk"
 
 
@@ -254,6 +259,20 @@ def test_public_base_url_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setenv("PUBLIC_BASE_URL", "https://mirror.example.test/")
     assert S.from_env().public_base_url == "https://mirror.example.test/"
+
+
+def test_alert_after_ingestion_config_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester.config import Settings as S
+
+    monkeypatch.setenv("ALERTS_AFTER_INGESTION", "true")
+    monkeypatch.setenv("ALERTS_MIN_CONFIDENCE", "Medium")
+    monkeypatch.setenv("ALERTS_PROFILE_FILTER", "Tyres")
+    monkeypatch.setenv("ALERTS_SYNC_LIMIT", "3")
+    s = S.from_env()
+    assert s.alerts_after_ingestion is True
+    assert s.alerts_min_confidence == "Medium"
+    assert s.alerts_profile_filter == "Tyres"
+    assert s.alerts_sync_limit == 3
 
 
 def test_overlapping_alert_guard(tmp_path: Path) -> None:
@@ -267,6 +286,100 @@ def test_overlapping_alert_guard(tmp_path: Path) -> None:
             scheduler._alerts_lock.release()
 
     asyncio.run(run_test())
+
+
+def test_alerts_do_not_run_after_ingestion_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import scheduler as sched
+
+    calls: list[str] = []
+
+    async def fake_ingestion(settings, bootstrap=False):
+        calls.append("ingestion")
+        return {}
+
+    def fake_alerts(*args, **kwargs):
+        calls.append("alerts")
+
+    monkeypatch.setattr(sched, "run_ingestion", fake_ingestion)
+    monkeypatch.setattr(sched, "run_alerts", fake_alerts)
+
+    asyncio.run(CronScheduler(make_settings(tmp_path))._run_once_locked())
+    assert calls == ["ingestion"]
+
+
+def test_alerts_run_after_successful_ingestion_with_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import scheduler as sched
+
+    settings = replace(
+        make_settings(tmp_path),
+        alerts_after_ingestion=True,
+        alerts_sync_airtable=True,
+        alerts_since_days=2,
+        alerts_min_confidence="Medium",
+        alerts_profile_filter="Tyres",
+        alerts_sync_limit=4,
+        alerts_airtable_max_sync_records=25,
+    )
+    seen_kwargs: dict = {}
+
+    async def fake_ingestion(settings, bootstrap=False):
+        return {}
+
+    def fake_alerts(settings_arg, **kwargs):
+        seen_kwargs.update(kwargs)
+        return {"decisions_scanned": 2, "matches_total": 1, "matches_syncable": 1, "airtable_sync": {"created_items": 1, "updated_items": 0, "created_matches": 1, "updated_matches": 0}}
+
+    monkeypatch.setattr(sched, "run_ingestion", fake_ingestion)
+    monkeypatch.setattr(sched, "run_alerts", fake_alerts)
+
+    asyncio.run(CronScheduler(settings)._run_once_locked())
+    assert seen_kwargs["write_json"] is True
+    assert seen_kwargs["sync_airtable"] is True
+    assert seen_kwargs["since_days"] == 2
+    assert seen_kwargs["min_confidence"] == "Medium"
+    assert seen_kwargs["profile"] == "Tyres"
+    assert seen_kwargs["sync_limit"] == 4
+    assert seen_kwargs["max_sync_records"] == 25
+    assert seen_kwargs["dry_run"] is False
+    assert seen_kwargs["include_low_confidence"] is False
+
+
+def test_alerts_do_not_run_when_ingestion_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import scheduler as sched
+
+    calls: list[str] = []
+    settings = replace(make_settings(tmp_path), alerts_after_ingestion=True)
+
+    async def fake_ingestion(settings, bootstrap=False):
+        raise RuntimeError("ingestion failed")
+
+    def fake_alerts(*args, **kwargs):
+        calls.append("alerts")
+
+    monkeypatch.setattr(sched, "run_ingestion", fake_ingestion)
+    monkeypatch.setattr(sched, "run_alerts", fake_alerts)
+
+    asyncio.run(CronScheduler(settings)._run_once_locked())
+    assert calls == []
+
+
+def test_after_ingestion_alert_exception_is_logged_and_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    from upc_ingester import scheduler as sched
+
+    settings = replace(make_settings(tmp_path), alerts_after_ingestion=True)
+
+    async def fake_ingestion(settings, bootstrap=False):
+        return {}
+
+    def fake_alerts(*args, **kwargs):
+        raise RuntimeError("airtable cap")
+
+    monkeypatch.setattr(sched, "run_ingestion", fake_ingestion)
+    monkeypatch.setattr(sched, "run_alerts", fake_alerts)
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(CronScheduler(settings)._run_once_locked())
+    assert "monitor service will keep running" in caplog.text
 
 
 def test_airtable_cap_refuses_and_allows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -283,6 +396,43 @@ def test_airtable_cap_refuses_and_allows(tmp_path: Path, monkeypatch: pytest.Mon
 
     result = a.sync_matches_to_airtable(settings, [match], include_low_confidence=False, max_sync_records=3, dry_run=True)
     assert result["estimated_records"] == 2
+
+
+def test_sync_limit_limits_matches_synced_newest_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    settings = make_settings(tmp_path)
+    profile = WatchProfile("recA", "Legal", "Legal", [], [], ["injunction"], [])
+    decisions = [
+        sample_decision() | {"item_key": "node-old", "decision_date": "2026-04-20"},
+        sample_decision() | {"item_key": "node-new", "decision_date": "2026-04-22"},
+        sample_decision() | {"item_key": "node-mid", "decision_date": "2026-04-21"},
+    ]
+    matches = match_alerts(decisions, [profile])
+    created_match_keys: list[str] = []
+    item_ids: dict[str, str] = {}
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        if method == "GET" and params and "filterByFormula" in params:
+            return {"records": []}
+        if url.endswith(a.UPC_ITEMS_TABLE_ID) and method == "POST":
+            key = payload["fields"][a.UPC_ITEM_FIELDS["item_key"]]
+            item_ids[key] = f"rec-{key}"
+            return {"id": item_ids[key], "fields": payload["fields"]}
+        if url.endswith(a.MATCHES_TABLE_ID) and method == "POST":
+            created_match_keys.append(payload["fields"][a.MATCH_FIELDS["sync_key"]].split("::", 1)[0])
+            return {"id": f"rec-match-{len(created_match_keys)}", "fields": payload["fields"]}
+        return {"records": []}
+
+    monkeypatch.setattr(a, "_airtable_token", lambda: "token")
+    monkeypatch.setattr(a, "_record_count_hint", lambda base_id, token: 0)
+    monkeypatch.setattr(a, "_load_optional_upc_item_fields", lambda base_id, token: {})
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+
+    result = sync_matches_to_airtable(settings, matches, include_low_confidence=False, max_sync_records=10, dry_run=False, min_confidence="Medium", sync_limit=2)
+    assert result["created_matches"] == 2
+    assert result["created_items"] == 2
+    assert created_match_keys == ["node-new", "node-mid"]
 
 
 def test_scheduler_alert_failure_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

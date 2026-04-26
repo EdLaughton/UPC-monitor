@@ -110,6 +110,18 @@ def settings_for_backfill(
         index_page_max_retries=index_page_max_retries,
         latest_export_limit=max(base.latest_export_limit, min(max_items, 200)),
         write_all_json=write_all_json or base.write_all_json,
+        alerts_enabled=base.alerts_enabled,
+        alerts_after_ingestion=base.alerts_after_ingestion,
+        alerts_sync_airtable=base.alerts_sync_airtable,
+        alerts_schedule_hour=base.alerts_schedule_hour,
+        alerts_schedule_minute=base.alerts_schedule_minute,
+        alerts_since_days=base.alerts_since_days,
+        alerts_include_low_confidence=base.alerts_include_low_confidence,
+        alerts_min_confidence=base.alerts_min_confidence,
+        alerts_profile_filter=base.alerts_profile_filter,
+        alerts_sync_limit=base.alerts_sync_limit,
+        alerts_airtable_max_sync_records=base.alerts_airtable_max_sync_records,
+        airtable_base_id=base.airtable_base_id,
         public_base_url=base.public_base_url,
     )
 
@@ -144,6 +156,7 @@ async def main_async() -> int:
             sample_limit=args.sample_limit,
             profile=args.profile,
             min_confidence=args.min_confidence,
+            sync_limit=args.sync_limit,
         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

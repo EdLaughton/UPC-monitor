@@ -268,6 +268,7 @@ python -m upc_ingester alerts --sync-airtable
 python -m upc_ingester alerts --since-days 7
 python -m upc_ingester alerts --include-low-confidence
 python -m upc_ingester alerts --airtable-max-sync-records 100
+python -m upc_ingester alerts --min-confidence High --profile "Profile name" --sync-limit 10
 ```
 
 First run sequence:
@@ -295,26 +296,35 @@ Alerts write only under `/data/private`:
 - `/data/private/alerts.json`
 - `/data/private/alerts-digest-source.json`
 
-### Optional daily scheduled alerts (same container)
+### Recommended live alerts after ingestion
 
-Existing hourly UPC monitor remains unchanged.
+Recommended live workflow:
 
-Default alert scheduler config (disabled by default):
+- Normal UPC ingestion runs from `POLL_CRON`.
+- If ingestion succeeds, SQLite, static mirror pages, public JSON context, and PDFs are updated.
+- The monitor immediately runs alert matching.
+- If `ALERTS_SYNC_AIRTABLE=true`, matched alerts are synced to Airtable immediately after the normal UPC poll.
+- No separate Airtable or alerts schedule is required.
+- A ChatGPT workspace agent can process pending Airtable matches on its own schedule, using Airtable as the private queue and `upc.edlaughton.uk` JSON as public context.
 
-- `ALERTS_ENABLED=false`
+Recommended config:
+
+- `ALERTS_AFTER_INGESTION=true`
 - `ALERTS_SYNC_AIRTABLE=false`
-- `ALERTS_SCHEDULE_HOUR=10`
-- `ALERTS_SCHEDULE_MINUTE=5`
-- `ALERTS_SINCE_DAYS=7`
+- `ALERTS_SINCE_DAYS=2`
+- `ALERTS_MIN_CONFIDENCE=High`
+- `ALERTS_PROFILE_FILTER=` optional
+- `ALERTS_SYNC_LIMIT=0` optional; `0` means no explicit match limit
 - `ALERTS_INCLUDE_LOW_CONFIDENCE=false`
 - `ALERTS_AIRTABLE_MAX_SYNC_RECORDS=100`
 
-When enabled:
+Deprecated legacy knobs:
 
-- Alerts job writes private JSON each run.
-- Airtable sync is optional (`ALERTS_SYNC_AIRTABLE=true`).
-- Alerts failures are logged and do not stop hourly ingestion.
-- Overlapping alerts runs are skipped safely.
+- `ALERTS_ENABLED`
+- `ALERTS_SCHEDULE_HOUR`
+- `ALERTS_SCHEDULE_MINUTE`
+
+Those old daily scheduler settings are ignored by the long-running monitor. Use `ALERTS_AFTER_INGESTION=true` instead.
 
 ### Unraid / Docker operational examples
 
@@ -329,18 +339,17 @@ docker run --rm \
   python -m upc_ingester alerts --write-json --sync-airtable --since-days 7 --airtable-max-sync-records 100
 ```
 
-Long-running monitor with scheduled alerts:
+Long-running monitor with alerts after each successful UPC poll:
 
 ```bash
 docker run -d \
   --name upc-monitor \
   -v /mnt/user/appdata/upc-monitor:/data \
   --env-file /mnt/user/appdata/upc-monitor/private/airtable.env \
-  -e ALERTS_ENABLED=true \
+  -e ALERTS_AFTER_INGESTION=true \
   -e ALERTS_SYNC_AIRTABLE=true \
-  -e ALERTS_SCHEDULE_HOUR=10 \
-  -e ALERTS_SCHEDULE_MINUTE=5 \
-  -e ALERTS_SINCE_DAYS=7 \
+  -e ALERTS_SINCE_DAYS=2 \
+  -e ALERTS_MIN_CONFIDENCE=High \
   -e ALERTS_AIRTABLE_MAX_SYNC_RECORDS=100 \
   ghcr.io/edlaughton/upc-monitor:latest
 ```

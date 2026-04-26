@@ -333,8 +333,32 @@ def _syncable_matches(matches: list[MatchResult], include_low_confidence: bool, 
     return [m for m in matches if _match_sync_filter(m, include_low_confidence) and _confidence_at_least(m.confidence, min_confidence)]
 
 
-def estimate_airtable_records(matches: list[MatchResult], include_low_confidence: bool, min_confidence: str = "Low") -> int:
-    syncable = _syncable_matches(matches, include_low_confidence, min_confidence)
+def _newest_first(matches: list[MatchResult]) -> list[MatchResult]:
+    return sorted(
+        matches,
+        key=lambda match: (
+            str(match.decision.get("decision_date") or ""),
+            str(match.decision.get("first_seen_at") or ""),
+            match.item_key,
+            match.profile_name,
+        ),
+        reverse=True,
+    )
+
+
+def _limit_matches(matches: list[MatchResult], sync_limit: int = 0) -> list[MatchResult]:
+    ordered = _newest_first(matches)
+    if sync_limit and sync_limit > 0:
+        return ordered[:sync_limit]
+    return ordered
+
+
+def _syncable_limited_matches(matches: list[MatchResult], include_low_confidence: bool, min_confidence: str = "Low", sync_limit: int = 0) -> list[MatchResult]:
+    return _limit_matches(_syncable_matches(matches, include_low_confidence, min_confidence), sync_limit)
+
+
+def estimate_airtable_records(matches: list[MatchResult], include_low_confidence: bool, min_confidence: str = "Low", sync_limit: int = 0) -> int:
+    syncable = _syncable_limited_matches(matches, include_low_confidence, min_confidence, sync_limit)
     return len({m.item_key for m in syncable}) + len(syncable)
 
 
@@ -564,10 +588,10 @@ def _load_optional_upc_item_fields(base_id: str, token: str) -> dict[str, str]:
     return {}
 
 
-def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], include_low_confidence: bool, max_sync_records: int, dry_run: bool, min_confidence: str = "Low") -> dict[str, Any]:
+def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], include_low_confidence: bool, max_sync_records: int, dry_run: bool, min_confidence: str = "Low", sync_limit: int = 0) -> dict[str, Any]:
     token = _airtable_token()
-    syncable = _syncable_matches(matches, include_low_confidence, min_confidence)
-    estimated = estimate_airtable_records(matches, include_low_confidence, min_confidence)
+    syncable = _syncable_limited_matches(matches, include_low_confidence, min_confidence, sync_limit)
+    estimated = estimate_airtable_records(matches, include_low_confidence, min_confidence, sync_limit)
     if estimated > max_sync_records:
         raise RuntimeError(f"Refusing Airtable sync: estimated {estimated} records (UPC Items + Matches) exceeds cap {max_sync_records}. Use --airtable-max-sync-records to raise the cap.")
     total_hint = _record_count_hint(settings.airtable_base_id, token)
@@ -597,7 +621,7 @@ def sync_matches_to_airtable(settings: Settings, matches: list[MatchResult], inc
     return {"syncable_matches": len(syncable), "estimated_records": estimated, "base_record_count_hint": total_hint, "created_items": created_items, "updated_items": updated_items, "created_matches": created_matches, "updated_matches": updated_matches}
 
 
-def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: bool, write_json: bool, sync_airtable: bool, max_sync_records: int, dry_run: bool, diagnostics: bool = False, sample_limit: int = 10, profile: str = "", min_confidence: str = "Low") -> dict[str, Any]:
+def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: bool, write_json: bool, sync_airtable: bool, max_sync_records: int, dry_run: bool, diagnostics: bool = False, sample_limit: int = 10, profile: str = "", min_confidence: str = "Low", sync_limit: int = 0) -> dict[str, Any]:
     db = Database(settings.db_path)
     db.init()
     decisions = load_recent_decisions(db, since_days)
@@ -607,7 +631,8 @@ def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: b
         profiles = [p for p in profiles if normalize_text(p.name) == profile_key]
     matches = match_alerts(decisions, profiles)
     sample_limit = max(0, sample_limit)
-    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "profile_filter": profile, "min_confidence": min_confidence, "matches_total": len(matches), "matches_by_confidence": _count_by_confidence(matches), "matches_syncable": len(_syncable_matches(matches, include_low_confidence, min_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence, min_confidence)}
+    syncable = _syncable_limited_matches(matches, include_low_confidence, min_confidence, sync_limit)
+    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "profile_filter": profile, "min_confidence": min_confidence, "sync_limit": sync_limit, "matches_total": len(matches), "matches_by_confidence": _count_by_confidence(matches), "matches_syncable": len(syncable), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence, min_confidence, sync_limit)}
     if dry_run or diagnostics:
         summary.update(build_alert_diagnostics(matches, include_low_confidence=include_low_confidence, min_confidence=min_confidence, sample_limit=sample_limit, public_base_url=settings.public_base_url))
     else:
@@ -617,7 +642,7 @@ def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: b
         summary["alerts_json"] = str(a)
         summary["alerts_digest_source_json"] = str(d)
     if sync_airtable:
-        summary["airtable_sync"] = sync_matches_to_airtable(settings, matches, include_low_confidence, max_sync_records, dry_run, min_confidence)
+        summary["airtable_sync"] = sync_matches_to_airtable(settings, matches, include_low_confidence, max_sync_records, dry_run, min_confidence, sync_limit)
     return summary
 
 
@@ -633,3 +658,4 @@ def register_alerts_subcommand(subparsers: argparse._SubParsersAction[argparse.A
     p.add_argument("--sample-limit", type=int, default=10)
     p.add_argument("--profile", default="")
     p.add_argument("--min-confidence", choices=list(CONFIDENCE_LABELS), default="Low")
+    p.add_argument("--sync-limit", type=int, default=0)
