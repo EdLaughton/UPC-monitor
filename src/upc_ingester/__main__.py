@@ -6,6 +6,7 @@ import json
 import logging
 import os
 
+from .alerts import register_alerts_subcommand, run_alerts
 from .config import Settings
 from .db import Database
 from .logging_config import configure_logging
@@ -57,6 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="store rows from index metadata only; do not fetch detail pages or PDFs",
     )
+    register_alerts_subcommand(subparsers)
     return parser
 
 
@@ -128,6 +130,19 @@ async def main_async() -> int:
         result = await run_ingestion(settings, bootstrap=True)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0
+    if command == "alerts":
+        result = run_alerts(
+            settings,
+            since_days=args.since_days,
+            include_low_confidence=args.include_low_confidence,
+            write_json=args.write_json,
+            sync_airtable=args.sync_airtable,
+            max_sync_records=args.airtable_max_sync_records,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+
     if command == "backfill":
         # Backfill is intentionally opt-in and one-shot so the always-on service
         # can remain gentle. The env vars are also set for any code paths that
