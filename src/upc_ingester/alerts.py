@@ -26,6 +26,7 @@ MATCH_SYNC_KEY_FIELD_NAME = "Sync key"
 
 UPC_ITEM_FIELDS = {"item_key": "fld7QIzJJn2TkdT0G", "decision_date": "fldHpBLNBbxlRrHr4", "first_seen_at": "fldy19CTje2vDn0uA", "case_number": "fldh0LqWPZA3udV8d", "registry_number": "fldmdRNrXoPtsFztV", "division": "fldbjL3hih0KbAJmM", "document_type": "fldUiEsARsQdyxK8l", "type_of_action": "fldYkaJlCPv49SX6q", "language": "fldCbQdvS6wsYZdBD", "parties_raw": "fldAtKQaJYOwZYYbV", "party_names": "fldRijRgrk4tNto75", "headnote": "fldoXWqS9FHIHuKMf", "keywords": "fldFDCoYsMZKlz01O", "mirror_url": "fldTWvWTAfzkAFXpT", "official_pdf_url": "fldHwpA6oVwT883ck", "pdf_text_available": "fldMMknYefGqluoJl", "status": "fldGi0z9O0nMSsrxb", "notes": "fldzFvx7X39KtolyE"}
 WATCH_PROFILE_FIELDS = {"profile_name": "fldHcGbPUISXVG30k", "alert_type": "fldIJvi2gwGWGOeDI", "parties_to_watch": "fldV8ZBIfHjNxN5ya", "sector_terms": "fldw0gyEpkhShsr9c", "legal_terms": "fldjOSms0Gxvethnn", "competitors": "fldu3IKj4RKCVwHsJ", "active": "fldokHp9rr98TxLuX"}
+WATCH_PROFILE_FIELD_NAMES = {"profile_name": "Profile name", "alert_type": "Alert type", "parties_to_watch": "Parties to watch", "sector_terms": "Sector terms", "legal_terms": "Legal terms/rules", "competitors": "Competitors/related entities", "active": "Active"}
 MATCH_FIELDS = {"match_id": "fld5ZiLZTJBQzVfxp", "upc_item": "fldVNi138U4L2kdxN", "watch_profile": "fldCTzGU1CzP5H4SH", "confidence": "fldhHhIHtN8ssNhLy", "matched_fields": "fldCTmcrGIh3SxI0h", "matched_terms": "fldP310q0LIQdaTI9", "private_reason": "fldkZJ3p43YF1Yg3M", "public_reason": "fldQKJteweTaafkqh", "recommended_action": "fldzdJ7YUg11CP3Re", "reviewer_decision": "fldClHnbVKV5dG4ym", "ai_draft": "fldJYP97bcClTfR3m", "human_edited_draft": "fld232as4RuA4RBAL", "sync_key": "fldGBNNeEfkk0HwZJ"}
 
 
@@ -70,6 +71,42 @@ def normalize_text(value: str) -> str:
 
 def split_terms(value: str) -> list[str]:
     return sorted({t for t in (normalize_text(x) for x in re.split(r"[\n,;]+", value or "")) if len(t) > 2})
+
+
+def _stringify_airtable_value(value: Any) -> str:
+    if isinstance(value, list):
+        return "\n".join(str(item) for item in value if item is not None)
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _watch_profile_field(fields: dict[str, Any], key: str, default: Any = "") -> Any:
+    field_id = WATCH_PROFILE_FIELDS[key]
+    field_name = WATCH_PROFILE_FIELD_NAMES[key]
+    if field_id in fields:
+        return fields[field_id]
+    return fields.get(field_name, default)
+
+
+def _watch_profile_active(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return normalize_text(value) not in {"false", "no", "inactive", "off", "0"}
+    return bool(value)
+
+
+def profile_term_detail(profile: WatchProfile) -> dict[str, Any]:
+    return {
+        "name": profile.name,
+        "party_terms": len(profile.parties_to_watch),
+        "sector_terms": len(profile.sector_terms),
+        "legal_terms": len(profile.legal_terms),
+        "competitor_terms": len(profile.competitors),
+    }
 
 
 def build_sync_key(item_key: str, profile_id_or_name: str) -> str:
@@ -119,7 +156,7 @@ def _extract_pdf_text_if_available(decision: dict[str, Any]) -> str:
 
 def _load_watch_profiles_from_airtable(base_id: str, token: str) -> list[WatchProfile]:
     out: list[WatchProfile] = []
-    params: dict[str, Any] = {"fields[]": list(WATCH_PROFILE_FIELDS.values())}
+    params: dict[str, Any] = {"fields[]": list(WATCH_PROFILE_FIELDS.values()), "returnFieldsByFieldId": "true"}
     offset = ""
     while True:
         if offset:
@@ -127,9 +164,20 @@ def _load_watch_profiles_from_airtable(base_id: str, token: str) -> list[WatchPr
         data = _http_json("GET", f"{AIRTABLE_API_URL}/{base_id}/{WATCH_PROFILES_TABLE_ID}", token=token, params=params)
         for rec in data.get("records", []):
             f = rec.get("fields", {})
-            if not f.get(WATCH_PROFILE_FIELDS["active"], True):
+            if not _watch_profile_active(_watch_profile_field(f, "active", True)):
                 continue
-            out.append(WatchProfile(rec["id"], str(f.get(WATCH_PROFILE_FIELDS["profile_name"], "Unnamed")), str(f.get(WATCH_PROFILE_FIELDS["alert_type"], "")), split_terms(str(f.get(WATCH_PROFILE_FIELDS["parties_to_watch"], ""))), split_terms(str(f.get(WATCH_PROFILE_FIELDS["sector_terms"], ""))), split_terms(str(f.get(WATCH_PROFILE_FIELDS["legal_terms"], ""))), split_terms(str(f.get(WATCH_PROFILE_FIELDS["competitors"], ""))), True))
+            out.append(
+                WatchProfile(
+                    rec["id"],
+                    _stringify_airtable_value(_watch_profile_field(f, "profile_name", "Unnamed")) or "Unnamed",
+                    _stringify_airtable_value(_watch_profile_field(f, "alert_type")),
+                    split_terms(_stringify_airtable_value(_watch_profile_field(f, "parties_to_watch"))),
+                    split_terms(_stringify_airtable_value(_watch_profile_field(f, "sector_terms"))),
+                    split_terms(_stringify_airtable_value(_watch_profile_field(f, "legal_terms"))),
+                    split_terms(_stringify_airtable_value(_watch_profile_field(f, "competitors"))),
+                    True,
+                )
+            )
         offset = data.get("offset", "")
         if not offset:
             return out
@@ -393,7 +441,7 @@ def run_alerts(settings: Settings, *, since_days: int, include_low_confidence: b
     decisions = load_recent_decisions(db, since_days)
     profiles = load_watch_profiles(settings)
     matches = match_alerts(decisions, profiles)
-    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "matches_total": len(matches), "matches_by_confidence": {"High": sum(1 for m in matches if m.confidence == "High"), "Medium": sum(1 for m in matches if m.confidence == "Medium"), "Low": sum(1 for m in matches if m.confidence == "Low")}, "matches_syncable": sum(1 for m in matches if _match_sync_filter(m, include_low_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence), "sample_matches": [{"item_key": m.item_key, "profile": m.profile_name, "confidence": m.confidence, "terms": m.matched_terms} for m in matches[:5]]}
+    summary: dict[str, Any] = {"decisions_scanned": len(decisions), "profiles_loaded": len(profiles), "profiles_loaded_detail": [profile_term_detail(p) for p in profiles], "matches_total": len(matches), "matches_by_confidence": {"High": sum(1 for m in matches if m.confidence == "High"), "Medium": sum(1 for m in matches if m.confidence == "Medium"), "Low": sum(1 for m in matches if m.confidence == "Low")}, "matches_syncable": sum(1 for m in matches if _match_sync_filter(m, include_low_confidence)), "estimated_airtable_records": estimate_airtable_records(matches, include_low_confidence), "sample_matches": [{"item_key": m.item_key, "profile": m.profile_name, "confidence": m.confidence, "terms": m.matched_terms} for m in matches[:5]]}
     if write_json:
         a, d = write_private_outputs(settings, matches)
         summary["alerts_json"] = str(a)

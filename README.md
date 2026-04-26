@@ -257,6 +257,8 @@ python -m upc_ingester alerts --write-json --since-days 30
 python -m upc_ingester alerts --write-json --sync-airtable --since-days 7 --airtable-max-sync-records 100
 ```
 
+Dry-run output includes `profiles_loaded_detail`, with per-profile counts for party, sector, legal, and competitor terms. If profiles load from Airtable but all term counts are zero, fix the Watch Profiles field mapping before syncing.
+
 Inside a running container:
 
 ```bash

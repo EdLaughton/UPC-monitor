@@ -6,9 +6,12 @@ import pytest
 
 from upc_ingester.alerts import (
     MATCH_FIELDS,
+    WATCH_PROFILE_FIELDS,
+    WATCH_PROFILE_FIELD_NAMES,
     WatchProfile,
     _extract_pdf_text_if_available,
     _find_record_by_field,
+    _load_watch_profiles_from_airtable,
     _match_sync_filter,
     _match_create_fields,
     _match_update_fields,
@@ -21,6 +24,7 @@ from upc_ingester.alerts import (
     build_sync_key,
     estimate_airtable_records,
     match_alerts,
+    run_alerts,
     split_terms,
     write_private_outputs,
 )
@@ -231,6 +235,141 @@ def test_formula_lookup_uses_valid_field_name(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(a, "_http_json", fake_http_json)
     _find_record_by_field("appBase", "tblTable", "Item key", "O'Reilly", "tok")
     assert seen_params["filterByFormula"] == r"{Item key}='O\'Reilly'"
+
+
+def test_airtable_profile_loader_requests_and_reads_field_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    seen_params: dict = {}
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        seen_params.update(params or {})
+        return {
+            "records": [
+                {
+                    "id": "recAbbott",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Abbott / glucose monitoring / medtech",
+                        WATCH_PROFILE_FIELDS["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Abbott\nAbbott Diabetes Care",
+                        WATCH_PROFILE_FIELDS["sector_terms"]: "glucose monitoring; medtech",
+                        WATCH_PROFILE_FIELDS["legal_terms"]: "injunction\nFRAND",
+                        WATCH_PROFILE_FIELDS["competitors"]: "Dexcom; Medtronic",
+                        WATCH_PROFILE_FIELDS["active"]: True,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    profiles = _load_watch_profiles_from_airtable("appBase", "token")
+    assert seen_params["returnFieldsByFieldId"] == "true"
+    assert seen_params["fields[]"] == list(WATCH_PROFILE_FIELDS.values())
+    assert profiles[0].parties_to_watch == ["abbott", "abbott diabetes care"]
+    assert profiles[0].sector_terms == ["glucose monitoring", "medtech"]
+    assert profiles[0].legal_terms == ["frand", "injunction"]
+    assert profiles[0].competitors == ["dexcom", "medtronic"]
+
+
+def test_airtable_profile_loader_accepts_field_name_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "records": [
+                {
+                    "id": "recAbbott",
+                    "fields": {
+                        WATCH_PROFILE_FIELD_NAMES["profile_name"]: "Abbott / glucose monitoring / medtech",
+                        WATCH_PROFILE_FIELD_NAMES["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELD_NAMES["parties_to_watch"]: ["Abbott", "Abbott Diabetes Care"],
+                        WATCH_PROFILE_FIELD_NAMES["sector_terms"]: "glucose monitoring; medtech",
+                        WATCH_PROFILE_FIELD_NAMES["legal_terms"]: "injunction\nFRAND",
+                        WATCH_PROFILE_FIELD_NAMES["competitors"]: "Dexcom; Medtronic",
+                        WATCH_PROFILE_FIELD_NAMES["active"]: True,
+                    },
+                }
+            ]
+        }
+
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    profiles = _load_watch_profiles_from_airtable("appBase", "token")
+    assert profiles[0].name == "Abbott / glucose monitoring / medtech"
+    assert profiles[0].parties_to_watch == ["abbott", "abbott diabetes care"]
+    assert profiles[0].sector_terms == ["glucose monitoring", "medtech"]
+    assert profiles[0].legal_terms == ["frand", "injunction"]
+    assert profiles[0].competitors == ["dexcom", "medtronic"]
+
+
+def test_dry_run_summary_includes_profile_term_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    profile = WatchProfile(
+        "recAbbott",
+        "Abbott / glucose monitoring / medtech",
+        "BD",
+        ["abbott", "abbott diabetes care"],
+        ["glucose monitoring"],
+        ["injunction", "frand"],
+        ["dexcom"],
+    )
+    monkeypatch.setattr(a, "load_recent_decisions", lambda db, since_days: [])
+    monkeypatch.setattr(a, "load_watch_profiles", lambda settings: [profile])
+
+    summary = run_alerts(
+        make_settings(tmp_path),
+        since_days=7,
+        include_low_confidence=False,
+        write_json=False,
+        sync_airtable=False,
+        max_sync_records=100,
+        dry_run=True,
+    )
+    assert summary["profiles_loaded_detail"] == [
+        {
+            "name": "Abbott / glucose monitoring / medtech",
+            "party_terms": 2,
+            "sector_terms": 1,
+            "legal_terms": 2,
+            "competitor_terms": 1,
+        }
+    ]
+
+
+def test_loaded_abbott_airtable_profile_matches_decision(monkeypatch: pytest.MonkeyPatch) -> None:
+    from upc_ingester import alerts as a
+
+    def fake_http_json(method: str, url: str, *, token: str, params=None, payload=None):
+        return {
+            "records": [
+                {
+                    "id": "recAbbott",
+                    "fields": {
+                        WATCH_PROFILE_FIELDS["profile_name"]: "Abbott / glucose monitoring / medtech",
+                        WATCH_PROFILE_FIELDS["alert_type"]: "BD",
+                        WATCH_PROFILE_FIELDS["parties_to_watch"]: "Abbott\nAbbott Diabetes Care",
+                        WATCH_PROFILE_FIELDS["sector_terms"]: "glucose monitoring",
+                        WATCH_PROFILE_FIELDS["legal_terms"]: "FRAND",
+                        WATCH_PROFILE_FIELDS["competitors"]: "",
+                        WATCH_PROFILE_FIELDS["active"]: True,
+                    },
+                }
+            ]
+        }
+
+    decision = sample_decision() | {
+        "item_key": "node-abbott",
+        "parties_raw": "Abbott Diabetes Care Inc. v. Example GmbH",
+        "title_raw": "Order in Abbott glucose monitoring dispute",
+        "headnote_text": "The panel considered Abbott arguments and FRAND issues.",
+    }
+    monkeypatch.setattr(a, "_http_json", fake_http_json)
+    profiles = _load_watch_profiles_from_airtable("appBase", "token")
+    matches = match_alerts([decision], profiles)
+    assert len(matches) == 1
+    assert matches[0].profile_name == "Abbott / glucose monitoring / medtech"
+    assert matches[0].confidence == "High"
+    assert "abbott" in matches[0].matched_terms
 
 
 def test_select_normalisation_helpers() -> None:
